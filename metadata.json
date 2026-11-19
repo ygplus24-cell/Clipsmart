@@ -1,0 +1,6 @@
+{
+  "name": "ClipGenius AI",
+  "description": "AI viral short-form video clipping studio that analyzes YouTube URLs and uploaded videos, scores viral moments, generates animated captions, and exports 9:16 clips for TikTok, Shorts, Reels, and Facebook.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
