@@ -18,7 +18,7 @@ import type {
   SubtitleStylePreset,
   TargetPlatform,
 } from '../types';
-import { apiUrl, parseApiResponse } from '../utils/api';
+import { apiUrl, parseApiResponse, parseRawApiText } from '../utils/api';
 import { formatPlatformName } from '../utils/formatters';
 
 interface NewProjectViewProps {
@@ -131,17 +131,21 @@ export const NewProjectView: React.FC<NewProjectViewProps> = ({
         };
         xhr.onload = () => {
           try {
-            const parsed = JSON.parse(xhr.responseText) as {
+            const parsed = parseRawApiText<{
               project?: Project;
               error?: string;
-            };
+            }>(xhr.responseText, xhr.status);
             if (xhr.status >= 200 && xhr.status < 300 && parsed.project) {
               resolve(parsed.project);
             } else {
               reject(new Error(parsed.error || 'Upload failed.'));
             }
-          } catch {
-            reject(new Error('Invalid server response during upload.'));
+          } catch (err) {
+            reject(
+              err instanceof Error
+                ? err
+                : new Error('Invalid server response during upload.')
+            );
           }
         };
         xhr.onerror = () => reject(new Error('Network error while uploading video.'));

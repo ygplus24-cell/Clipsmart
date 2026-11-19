@@ -16,7 +16,12 @@ import type {
   SubtitleStylePreset,
   TargetPlatform,
 } from '../types';
-import { apiUrl, parseApiResponse } from '../utils/api';
+import {
+  API_BASE_URL,
+  apiUrl,
+  downloadFileFromUrl,
+  parseApiResponse,
+} from '../utils/api';
 import { formatPlatformName } from '../utils/formatters';
 import { PWAInstallButton } from './PWAInstallButton';
 
@@ -35,6 +40,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [downloadingZip, setDownloadingZip] = useState(false);
   const [checkingEnv, setCheckingEnv] = useState(false);
+  const [envError, setEnvError] = useState<string | null>(null);
   const [envStatus, setEnvStatus] = useState<{
     geminiApiKey: boolean;
     appUrl: boolean;
@@ -46,25 +52,33 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   const fetchEnvStatus = useCallback(async () => {
     setCheckingEnv(true);
+    setEnvError(null);
     try {
       const res = await fetch(apiUrl('/api/health'));
-      if (res.ok) {
-        const data = await parseApiResponse<{
-          envStatus?: {
-            geminiApiKey: boolean;
-            appUrl: boolean;
-            youtubeOAuth: boolean;
-            tiktokOAuth: boolean;
-            instagramOAuth: boolean;
-            allowedOrigins: boolean;
-          };
-        }>(res);
-        if (data.envStatus) {
-          setEnvStatus(data.envStatus);
-        }
+      const data = await parseApiResponse<{
+        error?: string;
+        envStatus?: {
+          geminiApiKey: boolean;
+          appUrl: boolean;
+          youtubeOAuth: boolean;
+          tiktokOAuth: boolean;
+          instagramOAuth: boolean;
+          allowedOrigins: boolean;
+        };
+      }>(res);
+      if (!res.ok) {
+        throw new Error(data.error || `Backend health check failed (HTTP ${res.status}).`);
       }
-    } catch {
-      // Ignore transient check failure
+      if (data.envStatus) {
+        setEnvStatus(data.envStatus);
+      }
+    } catch (err) {
+      setEnvStatus(null);
+      setEnvError(
+        err instanceof Error
+          ? err.message
+          : 'Could not reach the Express backend server.'
+      );
     } finally {
       setCheckingEnv(false);
     }
@@ -106,21 +120,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setDownloadingZip(true);
     setSaveError(null);
     try {
-      const response = await fetch(apiUrl('/api/project/download-zip'), {
-        credentials: 'same-origin',
-      });
-      if (!response.ok) {
-        throw new Error(`Download failed (HTTP ${response.status}).`);
-      }
-      const blob = await response.blob();
-      const objectUrl = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = objectUrl;
-      anchor.download = 'clipgenius-ai-full-project.zip';
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+      await downloadFileFromUrl(
+        '/api/project/download-zip',
+        'clipgenius-ai-full-project.zip'
+      );
     } catch (err) {
       setSaveError(
         err instanceof Error ? err.message : 'Failed to download project archive.'
@@ -489,6 +492,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <span>Re-check Env</span>
           </button>
         </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/8 bg-[#0B0D12] px-3.5 py-2.5 text-xs">
+          <span className="text-gray-400">Backend API Target (VITE_API_BASE_URL):</span>
+          <span className="font-mono text-gray-200">
+            {API_BASE_URL || 'Same-origin (/api)'}
+          </span>
+        </div>
+
+        {envError && (
+          <div
+            role="alert"
+            className="rounded-lg border border-rose-500/30 bg-rose-950/40 px-4 py-3 text-xs leading-relaxed text-rose-200"
+          >
+            {envError}
+          </div>
+        )}
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {[

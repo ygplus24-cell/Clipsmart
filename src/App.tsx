@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Activity,
+  AlertTriangle,
   Download,
   Film,
   LayoutDashboard,
@@ -72,6 +73,7 @@ export default function App() {
   const [publishJobs, setPublishJobs] = useState<PublishJob[]>([]);
   const [publishNotifications, setPublishNotifications] = useState<PublishNotification[]>([]);
   const [loading, setLoading] = useState(true);
+  const [backendError, setBackendError] = useState<string | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [avatarError, setAvatarError] = useState(false);
   const [dismissedMobileInstall, setDismissedMobileInstall] = useState(false);
@@ -96,21 +98,30 @@ export default function App() {
   }, []);
 
   const loadWorkspace = useCallback(async () => {
+    setBackendError(null);
     try {
       const [projRes, setRes] = await Promise.all([
         fetch(apiUrl('/api/projects')),
         fetch(apiUrl('/api/settings')),
       ]);
-      if (projRes.ok) {
-        const data = await parseApiResponse<{ projects: Project[] }>(projRes);
-        setProjects(data.projects || []);
-        setActiveProjectId((prev) => prev || data.projects?.[0]?.id || null);
+      const data = await parseApiResponse<{ projects?: Project[]; error?: string }>(projRes);
+      if (!projRes.ok) {
+        throw new Error(data.error || `Failed to reach backend API (HTTP ${projRes.status}).`);
       }
-      if (setRes.ok) {
-        const sData = await parseApiResponse<{ settings: AppSettings }>(setRes);
-        if (sData.settings) setAppSettings(sData.settings);
+      setProjects(data.projects || []);
+      setActiveProjectId((prev) => prev || data.projects?.[0]?.id || null);
+
+      const sData = await parseApiResponse<{ settings?: AppSettings }>(setRes);
+      if (setRes.ok && sData.settings) {
+        setAppSettings(sData.settings);
       }
       await loadPublishState();
+    } catch (err) {
+      setBackendError(
+        err instanceof Error
+          ? err.message
+          : 'Could not connect to the Express backend server.'
+      );
     } finally {
       setLoading(false);
     }
@@ -618,6 +629,35 @@ export default function App() {
 
         {/* Active Page Viewport */}
         <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-8 sm:py-8">
+          {backendError && (
+            <div
+              role="alert"
+              className="mb-5 flex items-start justify-between gap-3 rounded-xl border border-amber-500/35 bg-amber-950/35 px-4 py-3.5 text-xs leading-relaxed text-amber-100"
+            >
+              <div className="flex items-start gap-2.5">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+                <div>
+                  <p className="font-semibold text-amber-200">{backendError}</p>
+                  <p className="mt-1 text-amber-200/80">
+                    If you deployed the frontend to a static host (such as Netlify), deploy the
+                    included Dockerfile backend (Cloud Run / Railway / Render), set{' '}
+                    <code className="font-mono text-white">VITE_API_BASE_URL</code> in your
+                    frontend build environment variables, and redeploy. If running locally, start{' '}
+                    <code className="font-mono text-white">npm run dev</code> (not{' '}
+                    <code className="font-mono text-white">vite</code> alone).
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setBackendError(null)}
+                aria-label="Dismiss backend warning"
+                className="rounded-lg p-1 text-amber-300 hover:bg-white/5 hover:text-white shrink-0"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
           {!isInstalled && !dismissedMobileInstall && (
             <div className="mb-5 flex items-center justify-between gap-3 rounded-xl border border-blue-500/25 bg-[#12151C] px-4 py-3 lg:hidden">
               <div className="min-w-0">
