@@ -7,6 +7,7 @@ import {
   LayoutDashboard,
   Menu,
   Plus,
+  RefreshCw,
   Scissors,
   Send,
   Settings,
@@ -32,7 +33,12 @@ import type {
   PublishJob,
   PublishNotification,
 } from './types';
-import { apiUrl, parseApiResponse } from './utils/api';
+import {
+  apiUrl,
+  fetchApiWithWarmupRetry,
+  parseApiResponse,
+  parseRawApiText,
+} from './utils/api';
 
 const DEFAULT_SETTINGS: AppSettings = {
   defaultDurationPreset: '30-60',
@@ -99,21 +105,34 @@ export default function App() {
 
   const loadWorkspace = useCallback(async () => {
     setBackendError(null);
+    setLoading(true);
     try {
-      const [projRes, setRes] = await Promise.all([
-        fetch(apiUrl('/api/projects')),
-        fetch(apiUrl('/api/settings')),
+      const [projResp, setResp] = await Promise.all([
+        fetchApiWithWarmupRetry('/api/projects'),
+        fetchApiWithWarmupRetry('/api/settings'),
       ]);
-      const data = await parseApiResponse<{ projects?: Project[]; error?: string }>(projRes);
-      if (!projRes.ok) {
-        throw new Error(data.error || `Failed to reach backend API (HTTP ${projRes.status}).`);
+      const data = parseRawApiText<{ projects?: Project[]; error?: string }>(
+        projResp.rawText,
+        projResp.res.status,
+        projResp.res.ok
+      );
+      if (!projResp.res.ok) {
+        throw new Error(
+          data.error || `Failed to reach backend API (HTTP ${projResp.res.status}).`
+        );
       }
       setProjects(data.projects || []);
       setActiveProjectId((prev) => prev || data.projects?.[0]?.id || null);
 
-      const sData = await parseApiResponse<{ settings?: AppSettings }>(setRes);
-      if (setRes.ok && sData.settings) {
-        setAppSettings(sData.settings);
+      if (setResp.res.ok) {
+        const sData = parseRawApiText<{ settings?: AppSettings }>(
+          setResp.rawText,
+          setResp.res.status,
+          setResp.res.ok
+        );
+        if (sData.settings) {
+          setAppSettings(sData.settings);
+        }
       }
       await loadPublishState();
     } catch (err) {
@@ -646,6 +665,14 @@ export default function App() {
                     <code className="font-mono text-white">npm run dev</code> (not{' '}
                     <code className="font-mono text-white">vite</code> alone).
                   </p>
+                  <button
+                    type="button"
+                    onClick={loadWorkspace}
+                    className="mt-2.5 inline-flex items-center gap-1.5 rounded-lg border border-amber-400/30 bg-amber-500/15 px-3 py-1 text-[11px] font-semibold text-amber-100 hover:bg-amber-500/25"
+                  >
+                    <RefreshCw className="h-3 w-3" />
+                    <span>Retry Connection</span>
+                  </button>
                 </div>
               </div>
               <button

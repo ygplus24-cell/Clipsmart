@@ -18,9 +18,9 @@ import type {
 } from '../types';
 import {
   API_BASE_URL,
-  apiUrl,
   downloadFileFromUrl,
-  parseApiResponse,
+  fetchApiWithWarmupRetry,
+  parseRawApiText,
 } from '../utils/api';
 import { formatPlatformName } from '../utils/formatters';
 import { PWAInstallButton } from './PWAInstallButton';
@@ -54,8 +54,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setCheckingEnv(true);
     setEnvError(null);
     try {
-      const res = await fetch(apiUrl('/api/health'));
-      const data = await parseApiResponse<{
+      const { res, rawText } = await fetchApiWithWarmupRetry('/api/health');
+      const data = parseRawApiText<{
         error?: string;
         envStatus?: {
           geminiApiKey: boolean;
@@ -65,7 +65,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           instagramOAuth: boolean;
           allowedOrigins: boolean;
         };
-      }>(res);
+      }>(rawText, res.status, res.ok);
       if (!res.ok) {
         throw new Error(data.error || `Backend health check failed (HTTP ${res.status}).`);
       }

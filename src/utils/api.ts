@@ -13,6 +13,19 @@ export function apiUrl(path: string): string {
   return `${API_BASE_URL}${normalized}`;
 }
 
+export class ServerWarmupError extends Error {
+  constructor(
+    message = 'Studio backend server is still starting up. Retrying automatically...'
+  ) {
+    super(message);
+    this.name = 'ServerWarmupError';
+  }
+}
+
+export function isServerWarmupHtml(html: string): boolean {
+  return /<title>\s*Starting Server/i.test(html) || /__aistudio_warmup|warmup/i.test(html);
+}
+
 export function parseRawApiText<T = Record<string, unknown>>(
   rawText: string,
   status: number,
@@ -31,9 +44,17 @@ export function parseRawApiText<T = Record<string, unknown>>(
     return JSON.parse(trimmed) as T;
   } catch {
     if (trimmed.startsWith('<')) {
+      if (isServerWarmupHtml(trimmed) || status === 502 || status === 503 || status === 504) {
+        throw new ServerWarmupError();
+      }
       if (status === 403) {
         throw new Error(
           'Access denied (HTTP 403). Please reload from your authorized AI Studio preview or deployed app URL.'
+        );
+      }
+      if (/accounts\.google\.com|ServiceLogin|Sign in - Google/i.test(trimmed)) {
+        throw new Error(
+          'Session authentication required to access the backend API. Open the app from your authorized AI Studio preview URL.'
         );
       }
       if (status === 200 || status === 404) {
@@ -56,6 +77,42 @@ export async function parseApiResponse<T = Record<string, unknown>>(
 ): Promise<T> {
   const rawText = await res.text();
   return parseRawApiText<T>(rawText, res.status, res.ok);
+}
+
+export async function fetchApiWithWarmupRetry(
+  path: string,
+  init?: RequestInit,
+  maxAttempts = 5,
+  delayMs = 1500
+): Promise<{ res: Response; rawText: string }> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch(apiUrl(path), init);
+      const rawText = await res.text();
+      const trimmed = rawText.trim();
+      const isWarmup =
+        (trimmed.startsWith('<') && isServerWarmupHtml(trimmed)) ||
+        res.status === 502 ||
+        res.status === 503 ||
+        res.status === 504;
+
+      if (isWarmup && attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, delayMs));
+        continue;
+      }
+      return { res, rawText };
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, delayMs));
+        continue;
+      }
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new ServerWarmupError('Could not connect to the Express backend server.');
 }
 
 export async function downloadFileFromUrl(
