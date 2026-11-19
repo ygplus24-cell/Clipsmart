@@ -1185,6 +1185,37 @@ async function startServer() {
         const val = (process.env[name] || '').trim();
         return Boolean(val && !val.startsWith('MY_'));
       });
+    const rawAppUrl = (process.env.APP_URL || '').trim();
+    const resolvedAppUrl =
+      rawAppUrl && rawAppUrl !== 'MY_APP_URL' && /^https?:\/\//i.test(rawAppUrl)
+        ? rawAppUrl.replace(/\/+$/, '')
+        : `http://localhost:${PORT}`;
+
+    const ytId = hasRealEnv('GOOGLE_CLIENT_ID', 'YOUTUBE_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_ID');
+    const ytSecret = hasRealEnv(
+      'GOOGLE_CLIENT_SECRET',
+      'YOUTUBE_CLIENT_SECRET',
+      'GOOGLE_OAUTH_CLIENT_SECRET'
+    );
+    const ttId = hasRealEnv('TIKTOK_CLIENT_KEY', 'TIKTOK_CLIENT_ID');
+    const ttSecret = hasRealEnv('TIKTOK_CLIENT_SECRET');
+    const igId = hasRealEnv(
+      'META_APP_ID',
+      'INSTAGRAM_APP_ID',
+      'FACEBOOK_APP_ID',
+      'META_CLIENT_ID',
+      'INSTAGRAM_CLIENT_ID',
+      'FACEBOOK_CLIENT_ID'
+    );
+    const igSecret = hasRealEnv(
+      'META_APP_SECRET',
+      'INSTAGRAM_APP_SECRET',
+      'FACEBOOK_APP_SECRET',
+      'META_CLIENT_SECRET',
+      'INSTAGRAM_CLIENT_SECRET',
+      'FACEBOOK_CLIENT_SECRET'
+    );
+
     res.json({
       ok: true,
       ffmpegAvailable,
@@ -1192,18 +1223,21 @@ async function startServer() {
       storageWritable,
       hasGeminiKey: hasRealEnv('GEMINI_API_KEY'),
       environment: process.env.NODE_ENV || 'development',
+      resolvedAppUrl,
+      oauthCallbacks: {
+        youtube: `${resolvedAppUrl}/api/oauth/youtube/callback`,
+        tiktok: `${resolvedAppUrl}/api/oauth/tiktok/callback`,
+        instagram: `${resolvedAppUrl}/api/oauth/instagram/callback`,
+      },
       envStatus: {
         geminiApiKey: hasRealEnv('GEMINI_API_KEY'),
         appUrl: hasRealEnv('APP_URL'),
-        youtubeOAuth:
-          hasRealEnv('GOOGLE_CLIENT_ID', 'YOUTUBE_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_ID') &&
-          hasRealEnv('GOOGLE_CLIENT_SECRET', 'YOUTUBE_CLIENT_SECRET', 'GOOGLE_OAUTH_CLIENT_SECRET'),
-        tiktokOAuth:
-          hasRealEnv('TIKTOK_CLIENT_KEY', 'TIKTOK_CLIENT_ID') &&
-          hasRealEnv('TIKTOK_CLIENT_SECRET'),
-        instagramOAuth:
-          hasRealEnv('META_APP_ID', 'INSTAGRAM_APP_ID', 'FACEBOOK_APP_ID') &&
-          hasRealEnv('META_APP_SECRET', 'INSTAGRAM_APP_SECRET', 'FACEBOOK_APP_SECRET'),
+        youtubeOAuth: ytId && ytSecret,
+        youtubePartial: ytId !== ytSecret ? (ytId ? 'missing_secret' : 'missing_id') : undefined,
+        tiktokOAuth: ttId && ttSecret,
+        tiktokPartial: ttId !== ttSecret ? (ttId ? 'missing_secret' : 'missing_id') : undefined,
+        instagramOAuth: igId && igSecret,
+        instagramPartial: igId !== igSecret ? (igId ? 'missing_secret' : 'missing_id') : undefined,
         allowedOrigins: hasRealEnv('ALLOWED_ORIGINS'),
       },
     });

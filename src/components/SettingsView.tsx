@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   Check,
+  Copy,
   Download,
   KeyRound,
   Loader2,
@@ -41,12 +42,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [downloadingZip, setDownloadingZip] = useState(false);
   const [checkingEnv, setCheckingEnv] = useState(false);
   const [envError, setEnvError] = useState<string | null>(null);
+  const [copiedUri, setCopiedUri] = useState<string | null>(null);
+  const [resolvedAppUrl, setResolvedAppUrl] = useState<string | null>(null);
+  const [oauthCallbacks, setOauthCallbacks] = useState<{
+    youtube: string;
+    tiktok: string;
+    instagram: string;
+  } | null>(null);
   const [envStatus, setEnvStatus] = useState<{
     geminiApiKey: boolean;
     appUrl: boolean;
     youtubeOAuth: boolean;
+    youtubePartial?: 'missing_secret' | 'missing_id';
     tiktokOAuth: boolean;
+    tiktokPartial?: 'missing_secret' | 'missing_id';
     instagramOAuth: boolean;
+    instagramPartial?: 'missing_secret' | 'missing_id';
     allowedOrigins: boolean;
   } | null>(null);
 
@@ -57,12 +68,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       const { res, rawText } = await fetchApiWithWarmupRetry('/api/health');
       const data = parseRawApiText<{
         error?: string;
+        resolvedAppUrl?: string;
+        oauthCallbacks?: {
+          youtube: string;
+          tiktok: string;
+          instagram: string;
+        };
         envStatus?: {
           geminiApiKey: boolean;
           appUrl: boolean;
           youtubeOAuth: boolean;
+          youtubePartial?: 'missing_secret' | 'missing_id';
           tiktokOAuth: boolean;
+          tiktokPartial?: 'missing_secret' | 'missing_id';
           instagramOAuth: boolean;
+          instagramPartial?: 'missing_secret' | 'missing_id';
           allowedOrigins: boolean;
         };
       }>(rawText, res.status, res.ok);
@@ -71,6 +91,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       }
       if (data.envStatus) {
         setEnvStatus(data.envStatus);
+      }
+      if (data.resolvedAppUrl) {
+        setResolvedAppUrl(data.resolvedAppUrl);
+      }
+      if (data.oauthCallbacks) {
+        setOauthCallbacks(data.oauthCallbacks);
       }
     } catch (err) {
       setEnvStatus(null);
@@ -83,6 +109,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       setCheckingEnv(false);
     }
   }, []);
+
+  const handleCopyText = async (value: string) => {
+    await navigator.clipboard.writeText(value);
+    setCopiedUri(value);
+    setTimeout(() => setCopiedUri(null), 2000);
+  };
 
   useEffect(() => {
     fetchEnvStatus();
@@ -515,54 +547,98 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               label: 'Gemini AI Video Analysis',
               vars: 'GEMINI_API_KEY',
               connected: envStatus?.geminiApiKey ?? false,
+              partial: undefined,
+              callbackUri: undefined,
             },
             {
               label: 'Hosted App URL',
-              vars: 'APP_URL',
+              vars: resolvedAppUrl ? `APP_URL (${resolvedAppUrl})` : 'APP_URL',
               connected: envStatus?.appUrl ?? false,
+              partial: undefined,
+              callbackUri: undefined,
             },
             {
               label: 'YouTube Shorts OAuth',
               vars: 'GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET',
               connected: envStatus?.youtubeOAuth ?? false,
+              partial: envStatus?.youtubePartial,
+              callbackUri: oauthCallbacks?.youtube,
             },
             {
               label: 'TikTok Posting OAuth',
               vars: 'TIKTOK_CLIENT_KEY + TIKTOK_CLIENT_SECRET',
               connected: envStatus?.tiktokOAuth ?? false,
+              partial: envStatus?.tiktokPartial,
+              callbackUri: oauthCallbacks?.tiktok,
             },
             {
               label: 'Instagram Reels OAuth',
               vars: 'META_APP_ID + META_APP_SECRET',
               connected: envStatus?.instagramOAuth ?? false,
+              partial: envStatus?.instagramPartial,
+              callbackUri: oauthCallbacks?.instagram,
             },
             {
               label: 'CORS Allowed Origins (Optional)',
               vars: 'ALLOWED_ORIGINS',
               connected: envStatus?.allowedOrigins ?? false,
+              partial: undefined,
+              callbackUri: undefined,
             },
-          ].map((item) => (
-            <div
-              key={item.label}
-              className="flex items-center justify-between gap-3 rounded-lg border border-white/8 bg-[#0B0D12] px-3.5 py-2.5"
-            >
-              <div className="min-w-0">
-                <p className="text-xs font-medium text-white">{item.label}</p>
-                <p className="mt-0.5 truncate font-mono text-[11px] text-gray-400">
-                  {item.vars}
-                </p>
-              </div>
-              <span
-                className={`rounded px-2 py-0.5 text-[11px] font-semibold whitespace-nowrap shrink-0 ${
-                  item.connected
-                    ? 'bg-emerald-500/15 text-emerald-300'
-                    : 'bg-amber-500/15 text-amber-300'
-                }`}
+          ].map((item) => {
+            const statusText = item.connected
+              ? 'Connected'
+              : item.partial === 'missing_secret'
+              ? 'Missing Secret'
+              : item.partial === 'missing_id'
+              ? 'Missing ID'
+              : 'Not Set';
+            return (
+              <div
+                key={item.label}
+                className="rounded-lg border border-white/8 bg-[#0B0D12] px-3.5 py-2.5 space-y-2"
               >
-                {item.connected ? 'Connected' : 'Not Set'}
-              </span>
-            </div>
-          ))}
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium text-white">{item.label}</p>
+                    <p className="mt-0.5 truncate font-mono text-[11px] text-gray-400">
+                      {item.vars}
+                    </p>
+                  </div>
+                  <span
+                    className={`rounded px-2 py-0.5 text-[11px] font-semibold whitespace-nowrap shrink-0 ${
+                      item.connected
+                        ? 'bg-emerald-500/15 text-emerald-300'
+                        : item.partial
+                        ? 'bg-rose-500/15 text-rose-300'
+                        : 'bg-amber-500/15 text-amber-300'
+                    }`}
+                  >
+                    {statusText}
+                  </span>
+                </div>
+                {item.callbackUri && (
+                  <div className="flex items-center justify-between gap-2 border-t border-white/6 pt-1.5">
+                    <span className="truncate font-mono text-[10px] text-gray-400">
+                      {item.callbackUri}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleCopyText(item.callbackUri!)}
+                      className="inline-flex items-center gap-1 text-[10px] font-medium text-blue-400 hover:text-blue-300 shrink-0"
+                    >
+                      {copiedUri === item.callbackUri ? (
+                        <Check className="h-3 w-3 text-emerald-400" />
+                      ) : (
+                        <Copy className="h-3 w-3" />
+                      )}
+                      <span>{copiedUri === item.callbackUri ? 'Copied' : 'Copy URI'}</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       </section>
     </form>

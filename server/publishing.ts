@@ -134,19 +134,25 @@ export function registerPublishingRoutes(
         clientSecret: readEnvValue('TIKTOK_CLIENT_SECRET'),
       };
     }
-    return {
-      clientId: readEnvValue(
-        'META_APP_ID',
-        'INSTAGRAM_APP_ID',
-        'FACEBOOK_APP_ID'
-      ),
-      clientSecret: readEnvValue(
-        'META_APP_SECRET',
-        'INSTAGRAM_APP_SECRET',
-        'FACEBOOK_APP_SECRET'
-      ),
+      return {
+        clientId: readEnvValue(
+          'META_APP_ID',
+          'INSTAGRAM_APP_ID',
+          'FACEBOOK_APP_ID',
+          'META_CLIENT_ID',
+          'INSTAGRAM_CLIENT_ID',
+          'FACEBOOK_CLIENT_ID'
+        ),
+        clientSecret: readEnvValue(
+          'META_APP_SECRET',
+          'INSTAGRAM_APP_SECRET',
+          'FACEBOOK_APP_SECRET',
+          'META_CLIENT_SECRET',
+          'INSTAGRAM_CLIENT_SECRET',
+          'FACEBOOK_CLIENT_SECRET'
+        ),
+      };
     };
-  };
 
   const isPlatformConfigured = (platform: PublishPlatform): boolean => {
     const { clientId, clientSecret } = getOAuthCreds(platform);
