@@ -14,14 +14,32 @@ import {
   TriangleAlert,
   Upload,
 } from 'lucide-react';
-import type { ClipCandidate, Project } from '../types';
-import { apiUrl, downloadFileFromUrl } from '../utils/api';
+import type {
+  ClipCandidate,
+  ExportQualityMode,
+  Project,
+  ReadyMp4Download,
+} from '../types';
+import {
+  apiUrl,
+  buildClipDownloadFilename,
+  downloadFileFromUrl,
+  isClipRenderedForQuality,
+} from '../utils/api';
 import { formatDurationLabel, formatTimecode } from '../utils/formatters';
+import { ReadyMp4Banner } from './ReadyMp4Banner';
 
 interface ExportViewProps {
   project: Project | null;
-  onRenderClip: (clipId: string) => Promise<void>;
-  onRenderBatch: () => Promise<void>;
+  exportQuality: ExportQualityMode;
+  readyMp4Download: ReadyMp4Download | null;
+  isProjectSyncedOnServer: boolean;
+  onDismissReadyMp4: () => void;
+  onMarkDirectMp4Download: (clip: ClipCandidate, quality?: ExportQualityMode) => void;
+  onChangeExportQuality: (quality: ExportQualityMode) => void;
+  onRenderClip: (clipId: string, quality?: ExportQualityMode) => Promise<void>;
+  onRenderBatch: (quality?: ExportQualityMode) => Promise<void>;
+  onDownloadClip: (clip: ClipCandidate, quality?: ExportQualityMode) => Promise<void>;
   onAttachVideo: (projectId: string, file: File) => Promise<void>;
   onOpenEditor: (clipId: string) => void;
   onToggleApprove?: (clipId: string, approved: boolean) => Promise<void>;
@@ -31,8 +49,15 @@ interface ExportViewProps {
 
 export const ExportView: React.FC<ExportViewProps> = ({
   project,
+  exportQuality,
+  readyMp4Download,
+  isProjectSyncedOnServer,
+  onDismissReadyMp4,
+  onMarkDirectMp4Download,
+  onChangeExportQuality,
   onRenderClip,
   onRenderBatch,
+  onDownloadClip,
   onAttachVideo,
   onOpenEditor,
   onToggleApprove,
@@ -44,16 +69,34 @@ export const ExportView: React.FC<ExportViewProps> = ({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [previewClip, setPreviewClip] = useState<ClipCandidate | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [zipMissingMp4Warning, setZipMissingMp4Warning] = useState(false);
   const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   const handleDownload = async (key: string, url: string, filename: string) => {
     setDownloadingKey(key);
     setExportError(null);
+    if (key === 'zip') setZipMissingMp4Warning(false);
     try {
-      await downloadFileFromUrl(url, filename);
+      const { mp4CountHeader } = await downloadFileFromUrl(url, filename);
+      if (key === 'zip' && mp4CountHeader === '0') {
+        setZipMissingMp4Warning(true);
+      }
     } catch (err) {
       setExportError(err instanceof Error ? err.message : 'Download failed.');
+    } finally {
+      setDownloadingKey(null);
+    }
+  };
+
+  const handleClipMp4Download = async (clip: ClipCandidate) => {
+    const key = `mp4_${clip.id}`;
+    setDownloadingKey(key);
+    setExportError(null);
+    try {
+      await onDownloadClip(clip, exportQuality);
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : 'MP4 download failed.');
     } finally {
       setDownloadingKey(null);
     }
@@ -87,7 +130,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
     setBatchRendering(true);
     setExportError(null);
     try {
-      await onRenderBatch();
+      await onRenderBatch(exportQuality);
     } catch (err) {
       setExportError(err instanceof Error ? err.message : 'Batch render failed.');
     } finally {
@@ -100,6 +143,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
     if (!file) return;
     setAttaching(true);
     setExportError(null);
+    setZipMissingMp4Warning(false);
     try {
       await onAttachVideo(project.id, file);
     } catch (err) {
@@ -129,6 +173,23 @@ export const ExportView: React.FC<ExportViewProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-3 shrink-0">
+          <div className="flex items-center gap-2 rounded-lg border border-white/12 bg-[#0B0D12] px-3 py-1.5">
+            <span className="text-[11px] font-medium text-gray-400">Quality</span>
+            <select
+              value={exportQuality}
+              onChange={(e) => onChangeExportQuality(e.target.value as ExportQualityMode)}
+              aria-label="Export video quality"
+              className="bg-transparent text-xs font-semibold text-emerald-300 focus:outline-none"
+            >
+              <option value="best" className="bg-[#12151C] text-white">
+                Best Quality (Max Res · CRF 15 · 320k)
+              </option>
+              <option value="high_1080p" className="bg-[#12151C] text-white">
+                1080p HD (CRF 18 · 256k)
+              </option>
+            </select>
+          </div>
+
           {project.localVideoUrl && (
             <button
               type="button"
@@ -153,7 +214,9 @@ export const ExportView: React.FC<ExportViewProps> = ({
             onClick={() =>
               handleDownload(
                 'zip',
-                `/api/projects/${project.id}/export-zip`,
+                `/api/projects/${project.id}/export-zip?quality=${encodeURIComponent(
+                  exportQuality
+                )}`,
                 `${project.title
                   .toLowerCase()
                   .replace(/[^a-z0-9]+/g, '-')
@@ -169,8 +232,10 @@ export const ExportView: React.FC<ExportViewProps> = ({
             )}
             <span>
               {downloadingKey === 'zip'
-                ? 'Preparing ZIP...'
-                : 'Download Package (.ZIP)'}
+                ? 'Rendering & Zipping...'
+                : project.localVideoUrl
+                ? 'Download All Clips (.ZIP)'
+                : 'Download Subtitles & Kit (.ZIP)'}
             </span>
           </button>
         </div>
@@ -211,6 +276,41 @@ export const ExportView: React.FC<ExportViewProps> = ({
               <span>{attaching ? 'Uploading...' : 'Attach Video File'}</span>
             </button>
           </div>
+        </div>
+      )}
+
+      <ReadyMp4Banner readyDownload={readyMp4Download} onDismiss={onDismissReadyMp4} />
+
+      {zipMissingMp4Warning && (
+        <div
+          role="alert"
+          className="flex flex-col gap-3 rounded-xl border border-amber-500/40 bg-amber-950/35 px-4 py-3.5 text-xs text-amber-100 sm:flex-row sm:items-center sm:justify-between"
+        >
+          <div className="flex items-start gap-2.5">
+            <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+            <div>
+              <p className="font-semibold text-amber-200">
+                0 MP4 video files were included in that ZIP download
+              </p>
+              <p className="mt-1 text-amber-100/85">
+                That ZIP only contains <code className="font-mono text-white">subtitles/*.srt</code>{' '}
+                and <code className="font-mono text-white">social_media_kit.txt</code> because no
+                source video file is currently attached to this project. Attach your video file to
+                cut and export .MP4 clips.
+              </p>
+            </div>
+          </div>
+          {!project.localVideoUrl && (
+            <button
+              type="button"
+              onClick={() => fileRef.current?.click()}
+              disabled={attaching}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-3.5 py-2 text-xs font-semibold text-black hover:bg-amber-400 whitespace-nowrap shrink-0"
+            >
+              <Upload className="h-3.5 w-3.5" />
+              <span>Attach Video File</span>
+            </button>
+          )}
         </div>
       )}
 
@@ -340,8 +440,8 @@ export const ExportView: React.FC<ExportViewProps> = ({
               {project.localVideoUrl && (
                 <button
                   type="button"
-                  onClick={() => onRenderClip(clip.id)}
-                  disabled={clip.renderStatus === 'rendering'}
+                  onClick={() => onRenderClip(clip.id, exportQuality)}
+                  disabled={clip.renderStatus === 'rendering' || downloadingKey === `mp4_${clip.id}`}
                   className="rounded-lg bg-blue-600/20 px-3 py-2 text-xs font-semibold text-blue-300 hover:bg-blue-600/30 disabled:opacity-50 whitespace-nowrap"
                 >
                   {clip.renderStatus === 'completed' ? 'Re-render MP4' : 'Render MP4'}
@@ -349,39 +449,63 @@ export const ExportView: React.FC<ExportViewProps> = ({
               )}
 
               {clip.renderStatus === 'completed' && clip.renderedVideoUrl && (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => setPreviewClip(clip)}
-                    className="inline-flex items-center gap-1 rounded-lg border border-white/15 bg-[#1A1F2B] px-3 py-2 text-xs font-medium text-white hover:bg-[#242B3B] whitespace-nowrap"
-                  >
-                    <Play className="h-3.5 w-3.5" />
-                    <span>Preview</span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={downloadingKey === `mp4_${clip.id}`}
-                    onClick={() =>
-                      handleDownload(
-                        `mp4_${clip.id}`,
-                        clip.renderedVideoUrl!,
-                        `clip-${clip.index}.mp4`
-                      )
-                    }
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50 whitespace-nowrap"
-                  >
-                    {downloadingKey === `mp4_${clip.id}` ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Download className="h-3.5 w-3.5" />
-                    )}
-                    <span>
-                      {downloadingKey === `mp4_${clip.id}`
-                        ? 'Downloading...'
-                        : 'Download MP4'}
-                    </span>
-                  </button>
-                </>
+                <button
+                  type="button"
+                  onClick={() => setPreviewClip(clip)}
+                  className="inline-flex items-center gap-1 rounded-lg border border-white/15 bg-[#1A1F2B] px-3 py-2 text-xs font-medium text-white hover:bg-[#242B3B] whitespace-nowrap"
+                >
+                  <Play className="h-3.5 w-3.5" />
+                  <span>Preview</span>
+                </button>
+              )}
+
+              {isProjectSyncedOnServer &&
+              isClipRenderedForQuality(clip, exportQuality) ? (
+                <a
+                  href={apiUrl(
+                    `/api/projects/${project.id}/clips/${clip.id}/download?quality=${encodeURIComponent(
+                      exportQuality
+                    )}`
+                  )}
+                  download={buildClipDownloadFilename(clip)}
+                  rel="noopener noreferrer"
+                  onClick={() => onMarkDirectMp4Download(clip, exportQuality)}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 whitespace-nowrap"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  <span>Download MP4</span>
+                </a>
+              ) : project.localVideoUrl ||
+                (clip.renderStatus === 'completed' && clip.renderedVideoUrl) ? (
+                <button
+                  type="button"
+                  disabled={downloadingKey === `mp4_${clip.id}` || clip.renderStatus === 'rendering'}
+                  onClick={() => handleClipMp4Download(clip)}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50 whitespace-nowrap"
+                >
+                  {downloadingKey === `mp4_${clip.id}` ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Download className="h-3.5 w-3.5" />
+                  )}
+                  <span>
+                    {downloadingKey === `mp4_${clip.id}`
+                      ? 'Rendering MP4...'
+                      : isClipRenderedForQuality(clip, exportQuality)
+                      ? 'Download MP4'
+                      : 'Render & Download MP4'}
+                  </span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => fileRef.current?.click()}
+                  disabled={attaching}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500/20 border border-amber-500/40 px-3 py-2 text-xs font-semibold text-amber-200 hover:bg-amber-500/30 disabled:opacity-50 whitespace-nowrap"
+                >
+                  <Upload className="h-3.5 w-3.5" />
+                  <span>Attach Video for MP4</span>
+                </button>
               )}
 
               {onToggleApprove && (

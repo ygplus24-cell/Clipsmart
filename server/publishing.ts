@@ -2,6 +2,11 @@ import crypto from 'crypto';
 import type { Express, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
+import {
+  bindCanonicalEnvAliases,
+  readFirstRealEnv,
+  resolveAppUrl,
+} from './env.ts';
 import type {
   ConnectionStatus,
   PlatformConnectionInfo,
@@ -89,26 +94,16 @@ export function registerPublishingRoutes(
   >();
   const activeUploads = new Set<string>();
 
-  const getBaseAppUrl = (): string => {
-    const raw = (process.env.APP_URL || '').trim();
-    if (raw && raw !== 'MY_APP_URL' && /^https?:\/\//i.test(raw)) {
-      return raw.replace(/\/+$/, '');
-    }
-    return `http://localhost:${deps.port}`;
+  const getBaseAppUrl = (req?: Request): string => {
+    return resolveAppUrl(req, deps.port).url;
   };
 
-  const getRedirectUri = (platform: PublishPlatform): string => {
-    return `${getBaseAppUrl()}/api/oauth/${PLATFORM_SLUGS[platform]}/callback`;
+  const getRedirectUri = (platform: PublishPlatform, req?: Request): string => {
+    return `${getBaseAppUrl(req)}/api/oauth/${PLATFORM_SLUGS[platform]}/callback`;
   };
 
   const readEnvValue = (...keys: string[]): string => {
-    for (const k of keys) {
-      const val = (process.env[k] || '').trim();
-      if (val && !val.startsWith('MY_')) {
-        return val;
-      }
-    }
-    return '';
+    return readFirstRealEnv(...keys);
   };
 
   const getOAuthCreds = (
@@ -262,7 +257,7 @@ export function registerPublishingRoutes(
     return entry;
   };
 
-  const getPublicConnections = (): PlatformConnectionInfo[] => {
+  const getPublicConnections = (req?: Request): PlatformConnectionInfo[] => {
     const stored = readConnections();
     return PLATFORMS.map((platform) => {
       const rec = stored[platform];
@@ -290,7 +285,7 @@ export function registerPublishingRoutes(
         connectedAt: rec.connectedAt,
         expiresAt: rec.expiresAt,
         lastError: rec.lastError,
-        redirectUri: getRedirectUri(platform),
+        redirectUri: getRedirectUri(platform, req),
         requirementsNote: PLATFORM_NOTES[platform],
       };
     });
@@ -918,22 +913,24 @@ export function registerPublishingRoutes(
   };
 
   // Routes
-  app.get('/api/publish/state', (_req, res) => {
+  app.get('/api/publish/state', (req, res) => {
+    bindCanonicalEnvAliases(req);
     res.json({
-      connections: getPublicConnections(),
+      connections: getPublicConnections(req),
       jobs: readJobs(),
       notifications: readNotifications(),
     });
   });
 
   app.get('/api/oauth/:platform/url', (req, res) => {
+    bindCanonicalEnvAliases(req);
     const platform = SLUG_TO_PLATFORM[req.params.platform];
     if (!platform) {
       res.status(400).json({ error: 'Unsupported publishing platform.' });
       return;
     }
 
-    const redirectUri = getRedirectUri(platform);
+    const redirectUri = getRedirectUri(platform, req);
     if (!isPlatformConfigured(platform)) {
       res.status(400).json({
         error: `${PLATFORM_LABELS[platform]} OAuth credentials are not configured on the server. Add the required environment variables and callback URL (${redirectUri}) first.`,
@@ -1034,7 +1031,7 @@ export function registerPublishingRoutes(
       return;
     }
 
-    const redirectUri = getRedirectUri(platform);
+    const redirectUri = getRedirectUri(platform, req);
 
     try {
       if (platform === 'youtube_shorts') {

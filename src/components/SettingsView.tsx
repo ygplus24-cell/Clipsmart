@@ -1,14 +1,17 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   Check,
+  Cloud,
   Copy,
   Download,
   KeyRound,
   Loader2,
+  LogOut,
   RefreshCw,
   Save,
   Smartphone,
 } from 'lucide-react';
+import { useFirebase } from '../context/FirebaseContext';
 import type {
   AppSettings,
   AspectRatioFormat,
@@ -35,6 +38,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   settings,
   onSaveSettings,
 }) => {
+  const {
+    user,
+    firestoreConnected,
+    firestoreOffline,
+    projectId: firebaseProjectId,
+    databaseId: firebaseDatabaseId,
+    signingIn,
+    signInWithGoogle,
+    signOutUser,
+  } = useFirebase();
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -42,8 +55,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [downloadingZip, setDownloadingZip] = useState(false);
   const [checkingEnv, setCheckingEnv] = useState(false);
   const [envError, setEnvError] = useState<string | null>(null);
+  const [envNotice, setEnvNotice] = useState<string | null>(null);
   const [copiedUri, setCopiedUri] = useState<string | null>(null);
   const [resolvedAppUrl, setResolvedAppUrl] = useState<string | null>(null);
+  const [appUrlSource, setAppUrlSource] = useState<string | null>(null);
+  const [allowedOriginsList, setAllowedOriginsList] = useState<string[]>([]);
   const [oauthCallbacks, setOauthCallbacks] = useState<{
     youtube: string;
     tiktok: string;
@@ -52,6 +68,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [envStatus, setEnvStatus] = useState<{
     geminiApiKey: boolean;
     appUrl: boolean;
+    firebaseConfig?: boolean;
     youtubeOAuth: boolean;
     youtubePartial?: 'missing_secret' | 'missing_id';
     tiktokOAuth: boolean;
@@ -59,16 +76,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     instagramOAuth: boolean;
     instagramPartial?: 'missing_secret' | 'missing_id';
     allowedOrigins: boolean;
+    allowedOriginsMode?: 'explicit' | 'auto';
   } | null>(null);
 
-  const fetchEnvStatus = useCallback(async () => {
+  const fetchEnvStatus = useCallback(async (autoConnect = false) => {
     setCheckingEnv(true);
     setEnvError(null);
+    if (autoConnect) setEnvNotice(null);
     try {
-      const { res, rawText } = await fetchApiWithWarmupRetry('/api/health');
+      const { res, rawText } = await fetchApiWithWarmupRetry(
+        '/api/env/auto-connect',
+        autoConnect ? { method: 'POST' } : undefined
+      );
       const data = parseRawApiText<{
         error?: string;
         resolvedAppUrl?: string;
+        appUrlSource?: string;
+        allowedOriginsList?: string[];
         oauthCallbacks?: {
           youtube: string;
           tiktok: string;
@@ -77,6 +101,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         envStatus?: {
           geminiApiKey: boolean;
           appUrl: boolean;
+          firebaseConfig?: boolean;
           youtubeOAuth: boolean;
           youtubePartial?: 'missing_secret' | 'missing_id';
           tiktokOAuth: boolean;
@@ -84,6 +109,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           instagramOAuth: boolean;
           instagramPartial?: 'missing_secret' | 'missing_id';
           allowedOrigins: boolean;
+          allowedOriginsMode?: 'explicit' | 'auto';
         };
       }>(rawText, res.status, res.ok);
       if (!res.ok) {
@@ -95,8 +121,28 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       if (data.resolvedAppUrl) {
         setResolvedAppUrl(data.resolvedAppUrl);
       }
+      if (data.appUrlSource) {
+        setAppUrlSource(data.appUrlSource);
+      }
+      if (Array.isArray(data.allowedOriginsList)) {
+        setAllowedOriginsList(data.allowedOriginsList);
+      }
       if (data.oauthCallbacks) {
         setOauthCallbacks(data.oauthCallbacks);
+      }
+      if (autoConnect && data.envStatus) {
+        const connectedCount = [
+          data.envStatus.geminiApiKey,
+          data.envStatus.appUrl,
+          data.envStatus.firebaseConfig ?? firestoreConnected,
+          data.envStatus.allowedOrigins,
+          data.envStatus.youtubeOAuth,
+          data.envStatus.tiktokOAuth,
+          data.envStatus.instagramOAuth,
+        ].filter(Boolean).length;
+        setEnvNotice(
+          `Auto-connect completed: ${connectedCount}/7 environment services verified and bound.`
+        );
       }
     } catch (err) {
       setEnvStatus(null);
@@ -108,7 +154,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     } finally {
       setCheckingEnv(false);
     }
-  }, []);
+  }, [firestoreConnected]);
 
   const handleCopyText = async (value: string) => {
     await navigator.clipboard.writeText(value);
@@ -117,7 +163,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   useEffect(() => {
-    fetchEnvStatus();
+    fetchEnvStatus(false);
   }, [fetchEnvStatus]);
 
   const toggleDefaultPlatform = (platform: TargetPlatform) => {
@@ -470,6 +516,80 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       </section>
 
+      {/* Firebase Cloud Sync & Authentication */}
+      <section className="rounded-xl border border-white/8 bg-[#12151C] p-6 space-y-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-white/8 pb-3">
+          <div className="flex items-start gap-3">
+            <Cloud className="mt-0.5 h-5 w-5 text-blue-400 shrink-0" />
+            <div>
+              <h2 className="text-sm font-semibold text-white">
+                Firebase Cloud Sync &amp; Google Authentication
+              </h2>
+              <p className="mt-0.5 text-xs text-gray-400">
+                Sign in with Google to persist projects, clips, studio preferences, and publishing
+                history to Cloud Firestore across sessions.
+              </p>
+            </div>
+          </div>
+
+          {user ? (
+            <button
+              type="button"
+              onClick={() => signOutUser()}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-white/12 bg-[#171B24] px-3.5 py-2 text-xs font-medium text-gray-200 hover:bg-[#222836] whitespace-nowrap shrink-0"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+              <span>Sign Out</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => signInWithGoogle()}
+              disabled={signingIn}
+              className="inline-flex items-center gap-2 rounded-lg bg-white px-4 py-2 text-xs font-semibold text-gray-900 hover:bg-gray-100 disabled:opacity-50 whitespace-nowrap shrink-0"
+            >
+              {signingIn ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-gray-700" />
+              ) : null}
+              <span>{signingIn ? 'Signing in...' : 'Sign in with Google'}</span>
+            </button>
+          )}
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div className="rounded-lg border border-white/8 bg-[#0B0D12] px-3.5 py-2.5">
+            <p className="text-[11px] text-gray-400">Firestore Connection</p>
+            <p
+              className={`mt-1 text-xs font-semibold ${
+                firestoreOffline
+                  ? 'text-rose-300'
+                  : firestoreConnected
+                  ? 'text-emerald-300'
+                  : 'text-amber-300'
+              }`}
+            >
+              {firestoreOffline
+                ? 'Offline'
+                : firestoreConnected
+                ? 'Connected'
+                : 'Checking...'}
+            </p>
+          </div>
+          <div className="rounded-lg border border-white/8 bg-[#0B0D12] px-3.5 py-2.5">
+            <p className="text-[11px] text-gray-400">Signed-In Account</p>
+            <p className="mt-1 truncate text-xs font-medium text-white">
+              {user ? user.email || user.displayName || 'Google User' : 'Not signed in'}
+            </p>
+          </div>
+          <div className="rounded-lg border border-white/8 bg-[#0B0D12] px-3.5 py-2.5">
+            <p className="text-[11px] text-gray-400">Firebase Project / DB</p>
+            <p className="mt-1 truncate font-mono text-[11px] text-gray-300">
+              {firebaseProjectId} · {firebaseDatabaseId}
+            </p>
+          </div>
+        </div>
+      </section>
+
       {/* Full Project Source ZIP Download */}
       <section className="flex flex-col gap-4 rounded-xl border border-white/8 bg-[#12151C] p-6 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-start gap-3">
@@ -499,38 +619,50 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </button>
       </section>
 
-      {/* Server Environment Variables Status (Read-Only) */}
+      {/* Server Environment Variables & Auto-Connect */}
       <section className="rounded-xl border border-white/8 bg-[#12151C] p-6 space-y-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-white/8 pb-3">
           <div className="flex items-center gap-2.5">
             <KeyRound className="h-4 w-4 text-blue-400 shrink-0" />
             <div>
               <h2 className="text-sm font-semibold text-white">
-                Server Environment Variables Status
+                Environment Variables &amp; Auto-Connect
               </h2>
               <p className="mt-0.5 text-xs text-gray-400">
-                Add OAuth secrets in the AI Studio Secrets panel (or Cloud Run env vars), then
-                click Re-check to verify server connection.
+                Automatically binds runtime URLs, CORS origins, Firebase config, and `.env` /
+                AI Studio Secrets aliases. Add OAuth secrets in AI Studio Secrets, then click
+                Auto-Connect Env.
               </p>
             </div>
           </div>
           <button
             type="button"
-            onClick={fetchEnvStatus}
+            onClick={() => fetchEnvStatus(true)}
             disabled={checkingEnv}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-white/12 bg-[#171B24] px-3 py-1.5 text-xs font-medium text-gray-200 hover:bg-[#222836] whitespace-nowrap shrink-0"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-blue-500/40 bg-blue-600/15 px-3.5 py-1.5 text-xs font-semibold text-blue-200 hover:bg-blue-600/25 whitespace-nowrap shrink-0"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${checkingEnv ? 'animate-spin' : ''}`} />
-            <span>Re-check Env</span>
+            <span>{checkingEnv ? 'Connecting...' : 'Auto-Connect Env'}</span>
           </button>
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/8 bg-[#0B0D12] px-3.5 py-2.5 text-xs">
-          <span className="text-gray-400">Backend API Target (VITE_API_BASE_URL):</span>
-          <span className="font-mono text-gray-200">
-            {API_BASE_URL || 'Same-origin (/api)'}
+          <span className="text-gray-400">
+            Backend API Target (<span className="font-mono text-gray-300">VITE_API_BASE_URL</span>):
+          </span>
+          <span className="font-mono text-emerald-300">
+            {API_BASE_URL ||
+              (typeof window !== 'undefined'
+                ? `${window.location.origin} (Leave blank in AI Studio — auto same-origin)`
+                : 'Same-origin (/api)')}
           </span>
         </div>
+
+        {envNotice && (
+          <div className="rounded-lg border border-emerald-500/30 bg-emerald-950/35 px-4 py-2.5 text-xs text-emerald-200">
+            {envNotice}
+          </div>
+        )}
 
         {envError && (
           <div
@@ -547,47 +679,100 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               label: 'Gemini AI Video Analysis',
               vars: 'GEMINI_API_KEY',
               connected: envStatus?.geminiApiKey ?? false,
+              badgeOverride: envStatus?.geminiApiKey ? 'Connected' : undefined,
               partial: undefined,
               callbackUri: undefined,
+              envTemplate: undefined,
+              copyValue: undefined,
+              copyLabel: undefined,
             },
             {
               label: 'Hosted App URL',
               vars: resolvedAppUrl ? `APP_URL (${resolvedAppUrl})` : 'APP_URL',
               connected: envStatus?.appUrl ?? false,
+              badgeOverride: envStatus?.appUrl
+                ? appUrlSource === 'env'
+                  ? 'Connected'
+                  : 'Auto-Connected'
+                : undefined,
               partial: undefined,
               callbackUri: undefined,
+              envTemplate: undefined,
+              copyValue: undefined,
+              copyLabel: undefined,
+            },
+            {
+              label: 'Firebase & Cloud Firestore',
+              vars: `${firebaseProjectId} · ${firebaseDatabaseId}`,
+              connected: envStatus?.firebaseConfig ?? firestoreConnected,
+              badgeOverride:
+                (envStatus?.firebaseConfig ?? firestoreConnected)
+                  ? 'Auto-Connected'
+                  : undefined,
+              partial: undefined,
+              callbackUri: undefined,
+              envTemplate: undefined,
+              copyValue: undefined,
+              copyLabel: undefined,
+            },
+            {
+              label: 'CORS Allowed Origins',
+              vars:
+                envStatus?.allowedOriginsMode === 'explicit'
+                  ? 'ALLOWED_ORIGINS (Explicit)'
+                  : `Auto-resolved (${allowedOriginsList.length || 2} origins · optional)`,
+              connected: envStatus?.allowedOrigins ?? false,
+              badgeOverride: envStatus?.allowedOrigins
+                ? envStatus?.allowedOriginsMode === 'explicit'
+                  ? 'Connected'
+                  : 'Auto-Connected'
+                : undefined,
+              partial: undefined,
+              callbackUri: undefined,
+              envTemplate: undefined,
+              copyValue:
+                allowedOriginsList.length > 0
+                  ? allowedOriginsList.filter((o) => o.startsWith('https://')).join(',') ||
+                    allowedOriginsList.join(',')
+                  : undefined,
+              copyLabel: 'Copy Value',
             },
             {
               label: 'YouTube Shorts OAuth',
               vars: 'GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET',
               connected: envStatus?.youtubeOAuth ?? false,
+              badgeOverride: undefined,
               partial: envStatus?.youtubePartial,
               callbackUri: oauthCallbacks?.youtube,
+              envTemplate: 'GOOGLE_CLIENT_ID=\nGOOGLE_CLIENT_SECRET=',
+              copyValue: undefined,
+              copyLabel: undefined,
             },
             {
               label: 'TikTok Posting OAuth',
               vars: 'TIKTOK_CLIENT_KEY + TIKTOK_CLIENT_SECRET',
               connected: envStatus?.tiktokOAuth ?? false,
+              badgeOverride: undefined,
               partial: envStatus?.tiktokPartial,
               callbackUri: oauthCallbacks?.tiktok,
+              envTemplate: 'TIKTOK_CLIENT_KEY=\nTIKTOK_CLIENT_SECRET=',
+              copyValue: undefined,
+              copyLabel: undefined,
             },
             {
               label: 'Instagram Reels OAuth',
               vars: 'META_APP_ID + META_APP_SECRET',
               connected: envStatus?.instagramOAuth ?? false,
+              badgeOverride: undefined,
               partial: envStatus?.instagramPartial,
               callbackUri: oauthCallbacks?.instagram,
-            },
-            {
-              label: 'CORS Allowed Origins (Optional)',
-              vars: 'ALLOWED_ORIGINS',
-              connected: envStatus?.allowedOrigins ?? false,
-              partial: undefined,
-              callbackUri: undefined,
+              envTemplate: 'META_APP_ID=\nMETA_APP_SECRET=',
+              copyValue: undefined,
+              copyLabel: undefined,
             },
           ].map((item) => {
             const statusText = item.connected
-              ? 'Connected'
+              ? item.badgeOverride || 'Connected'
               : item.partial === 'missing_secret'
               ? 'Missing Secret'
               : item.partial === 'missing_id'
@@ -617,23 +802,63 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     {statusText}
                   </span>
                 </div>
-                {item.callbackUri && (
+                {(item.callbackUri || item.envTemplate || item.copyValue) && (
                   <div className="flex items-center justify-between gap-2 border-t border-white/6 pt-1.5">
                     <span className="truncate font-mono text-[10px] text-gray-400">
-                      {item.callbackUri}
+                      {item.callbackUri || item.copyValue}
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => handleCopyText(item.callbackUri!)}
-                      className="inline-flex items-center gap-1 text-[10px] font-medium text-blue-400 hover:text-blue-300 shrink-0"
-                    >
-                      {copiedUri === item.callbackUri ? (
-                        <Check className="h-3 w-3 text-emerald-400" />
-                      ) : (
-                        <Copy className="h-3 w-3" />
+                    <div className="flex items-center gap-2.5 shrink-0">
+                      {!item.connected && item.envTemplate && (
+                        <button
+                          type="button"
+                          onClick={() => handleCopyText(item.envTemplate!)}
+                          className="inline-flex items-center gap-1 text-[10px] font-medium text-gray-300 hover:text-white"
+                        >
+                          {copiedUri === item.envTemplate ? (
+                            <Check className="h-3 w-3 text-emerald-400" />
+                          ) : (
+                            <Copy className="h-3 w-3" />
+                          )}
+                          <span>
+                            {copiedUri === item.envTemplate ? 'Copied' : 'Copy Keys'}
+                          </span>
+                        </button>
                       )}
-                      <span>{copiedUri === item.callbackUri ? 'Copied' : 'Copy URI'}</span>
-                    </button>
+                      {item.copyValue && (
+                        <button
+                          type="button"
+                          onClick={() => handleCopyText(item.copyValue!)}
+                          className="inline-flex items-center gap-1 text-[10px] font-medium text-blue-400 hover:text-blue-300"
+                        >
+                          {copiedUri === item.copyValue ? (
+                            <Check className="h-3 w-3 text-emerald-400" />
+                          ) : (
+                            <Copy className="h-3 w-3" />
+                          )}
+                          <span>
+                            {copiedUri === item.copyValue
+                              ? 'Copied'
+                              : item.copyLabel || 'Copy'}
+                          </span>
+                        </button>
+                      )}
+                      {item.callbackUri && (
+                        <button
+                          type="button"
+                          onClick={() => handleCopyText(item.callbackUri!)}
+                          className="inline-flex items-center gap-1 text-[10px] font-medium text-blue-400 hover:text-blue-300"
+                        >
+                          {copiedUri === item.callbackUri ? (
+                            <Check className="h-3 w-3 text-emerald-400" />
+                          ) : (
+                            <Copy className="h-3 w-3" />
+                          )}
+                          <span>
+                            {copiedUri === item.callbackUri ? 'Copied' : 'Copy URI'}
+                          </span>
+                        </button>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>

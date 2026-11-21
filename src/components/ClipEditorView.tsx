@@ -20,24 +20,38 @@ import type {
   AppSettings,
   AspectRatioFormat,
   ClipCandidate,
+  ExportQualityMode,
   Project,
+  ReadyMp4Download,
   SubtitleStylePreset,
   TargetPlatform,
 } from '../types';
-import { apiUrl, downloadFileFromUrl } from '../utils/api';
+import {
+  apiUrl,
+  buildClipDownloadFilename,
+  isClipRenderedForQuality,
+} from '../utils/api';
 import {
   formatDurationLabel,
   formatPlatformName,
   formatTimecode,
 } from '../utils/formatters';
+import { ReadyMp4Banner } from './ReadyMp4Banner';
 
 interface ClipEditorViewProps {
   project: Project | null;
   activeClipId: string | null;
   appSettings: AppSettings;
+  exportQuality: ExportQualityMode;
+  readyMp4Download: ReadyMp4Download | null;
+  isProjectSyncedOnServer: boolean;
+  onDismissReadyMp4: () => void;
+  onMarkDirectMp4Download: (clip: ClipCandidate, quality?: ExportQualityMode) => void;
+  onChangeExportQuality: (quality: ExportQualityMode) => void;
   onSelectClip: (clipId: string) => void;
   onSaveClip: (clipId: string, patch: Partial<ClipCandidate>) => Promise<void>;
-  onRenderClip: (clipId: string) => Promise<void>;
+  onRenderClip: (clipId: string, quality?: ExportQualityMode) => Promise<void>;
+  onDownloadClip: (clip: ClipCandidate, quality?: ExportQualityMode) => Promise<void>;
   onRegenerateCopy: (clipId: string) => Promise<void>;
   onAttachVideo: (projectId: string, file: File) => Promise<void>;
   onGoToExport: () => void;
@@ -49,9 +63,16 @@ export const ClipEditorView: React.FC<ClipEditorViewProps> = ({
   project,
   activeClipId,
   appSettings,
+  exportQuality,
+  readyMp4Download,
+  isProjectSyncedOnServer,
+  onDismissReadyMp4,
+  onMarkDirectMp4Download,
+  onChangeExportQuality,
   onSelectClip,
   onSaveClip,
   onRenderClip,
+  onDownloadClip,
   onRegenerateCopy,
   onAttachVideo,
   onGoToExport,
@@ -164,6 +185,24 @@ export const ClipEditorView: React.FC<ClipEditorViewProps> = ({
     draft.endSeconds + 5
   );
 
+  const hasUnsavedRenderEdits = Boolean(
+    activeClip &&
+      (draft.startSeconds !== activeClip.startSeconds ||
+        draft.endSeconds !== activeClip.endSeconds ||
+        draft.speakerCenterX !== activeClip.speakerCenterX ||
+        draft.outputFormat !== activeClip.outputFormat ||
+        draft.subtitleStyle !== activeClip.subtitleStyle ||
+        draft.showHookBanner !== activeClip.showHookBanner ||
+        draft.addBackgroundMusic !== activeClip.addBackgroundMusic ||
+        draft.openingHook !== activeClip.openingHook ||
+        JSON.stringify(draft.segments) !== JSON.stringify(activeClip.segments))
+  );
+
+  const canDirectDownloadMp4 =
+    !hasUnsavedRenderEdits &&
+    isProjectSyncedOnServer &&
+    isClipRenderedForQuality(draft, exportQuality);
+
   const activeSegment = draft.segments.find(
     (s) => currentTime >= s.startSeconds && currentTime <= s.endSeconds
   );
@@ -263,9 +302,33 @@ export const ClipEditorView: React.FC<ClipEditorViewProps> = ({
         addBackgroundMusic: draft.addBackgroundMusic,
         segments: draft.segments,
       });
-      await onRenderClip(draft.id);
+      await onRenderClip(draft.id, exportQuality);
     } catch (err) {
       setEditorError(err instanceof Error ? err.message : 'Render failed.');
+    }
+  };
+
+  const handleDownloadNow = async () => {
+    setDownloadingMp4(true);
+    setEditorError(null);
+    try {
+      await onSaveClip(draft.id, {
+        title: draft.title,
+        openingHook: draft.openingHook,
+        startSeconds: draft.startSeconds,
+        endSeconds: draft.endSeconds,
+        speakerCenterX: draft.speakerCenterX,
+        outputFormat: draft.outputFormat,
+        subtitleStyle: draft.subtitleStyle,
+        showHookBanner: draft.showHookBanner,
+        addBackgroundMusic: draft.addBackgroundMusic,
+        segments: draft.segments,
+      });
+      await onDownloadClip(draft, exportQuality);
+    } catch (err) {
+      setEditorError(err instanceof Error ? err.message : 'MP4 download failed.');
+    } finally {
+      setDownloadingMp4(false);
     }
   };
 
@@ -359,6 +422,23 @@ export const ClipEditorView: React.FC<ClipEditorViewProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+          <div className="flex items-center gap-1.5 rounded-lg border border-white/12 bg-[#0B0D12] px-2.5 py-1.5">
+            <span className="text-[11px] text-gray-400">Quality</span>
+            <select
+              value={exportQuality}
+              onChange={(e) => onChangeExportQuality(e.target.value as ExportQualityMode)}
+              aria-label="Clip export quality"
+              className="bg-transparent text-xs font-semibold text-emerald-300 focus:outline-none"
+            >
+              <option value="best" className="bg-[#12151C] text-white">
+                Best (Max Res · CRF 15)
+              </option>
+              <option value="high_1080p" className="bg-[#12151C] text-white">
+                1080p HD (CRF 18)
+              </option>
+            </select>
+          </div>
+
           <button
             type="button"
             onClick={handleSave}
@@ -379,7 +459,7 @@ export const ClipEditorView: React.FC<ClipEditorViewProps> = ({
             <button
               type="button"
               onClick={handleRenderNow}
-              disabled={activeClip?.renderStatus === 'rendering'}
+              disabled={activeClip?.renderStatus === 'rendering' || downloadingMp4}
               className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-500 disabled:opacity-50 whitespace-nowrap shrink-0"
             >
               {activeClip?.renderStatus === 'rendering' ? (
@@ -392,6 +472,39 @@ export const ClipEditorView: React.FC<ClipEditorViewProps> = ({
               )}
             </button>
           ) : null}
+
+          {canDirectDownloadMp4 ? (
+            <a
+              href={apiUrl(
+                `/api/projects/${project.id}/clips/${draft.id}/download?quality=${encodeURIComponent(
+                  exportQuality
+                )}`
+              )}
+              download={buildClipDownloadFilename(draft)}
+              rel="noopener noreferrer"
+              onClick={() => onMarkDirectMp4Download(draft, exportQuality)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 whitespace-nowrap shrink-0"
+            >
+              <Download className="h-3.5 w-3.5" />
+              <span>Download MP4</span>
+            </a>
+          ) : (
+            (project.localVideoUrl || activeClip?.renderStatus === 'completed') && (
+              <button
+                type="button"
+                onClick={handleDownloadNow}
+                disabled={downloadingMp4 || activeClip?.renderStatus === 'rendering'}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50 whitespace-nowrap shrink-0"
+              >
+                {downloadingMp4 ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Download className="h-3.5 w-3.5" />
+                )}
+                <span>{downloadingMp4 ? 'Preparing MP4...' : 'Download MP4'}</span>
+              </button>
+            )
+          )}
 
           <button
             type="button"
@@ -428,6 +541,8 @@ export const ClipEditorView: React.FC<ClipEditorViewProps> = ({
           )}
         </div>
       </div>
+
+      <ReadyMp4Banner readyDownload={readyMp4Download} onDismiss={onDismissReadyMp4} />
 
       {editorError && (
         <div
@@ -596,34 +711,36 @@ export const ClipEditorView: React.FC<ClipEditorViewProps> = ({
                 <span className="font-medium text-emerald-300">
                   Rendered MP4 ready
                 </span>
-                <button
-                  type="button"
-                  disabled={downloadingMp4}
-                  onClick={async () => {
-                    setDownloadingMp4(true);
-                    setEditorError(null);
-                    try {
-                      await downloadFileFromUrl(
-                        draft.renderedVideoUrl!,
-                        `clip-${draft.index}.mp4`
-                      );
-                    } catch (err) {
-                      setEditorError(
-                        err instanceof Error ? err.message : 'MP4 download failed.'
-                      );
-                    } finally {
-                      setDownloadingMp4(false);
-                    }
-                  }}
-                  className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50 whitespace-nowrap"
-                >
-                  {downloadingMp4 ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
+                {canDirectDownloadMp4 ? (
+                  <a
+                    href={apiUrl(
+                      `/api/projects/${project.id}/clips/${draft.id}/download?quality=${encodeURIComponent(
+                        exportQuality
+                      )}`
+                    )}
+                    download={buildClipDownloadFilename(draft)}
+                    rel="noopener noreferrer"
+                    onClick={() => onMarkDirectMp4Download(draft, exportQuality)}
+                    className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-emerald-500 whitespace-nowrap"
+                  >
                     <Download className="h-3.5 w-3.5" />
-                  )}
-                  <span>{downloadingMp4 ? 'Downloading...' : 'Download MP4'}</span>
-                </button>
+                    <span>Download MP4</span>
+                  </a>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={downloadingMp4}
+                    onClick={handleDownloadNow}
+                    className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50 whitespace-nowrap"
+                  >
+                    {downloadingMp4 ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Download className="h-3.5 w-3.5" />
+                    )}
+                    <span>{downloadingMp4 ? 'Preparing...' : 'Download MP4'}</span>
+                  </button>
+                )}
               </div>
             )}
 

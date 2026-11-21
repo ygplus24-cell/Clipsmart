@@ -1,0 +1,524 @@
+{
+  "entities": {
+    "UserPublicProfile": {
+      "title": "UserPublicProfile",
+      "description": "Publicly non-sensitive display metadata for a ClipGenius AI creator.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "photoURL": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "displayName", "createdAt", "updatedAt"]
+    },
+    "UserPrivateInfo": {
+      "title": "UserPrivateInfo",
+      "description": "Isolated PII record for the authenticated creator.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 254
+        },
+        "emailVerified": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "email", "emailVerified", "createdAt", "updatedAt"]
+    },
+    "StudioPreferences": {
+      "title": "StudioPreferences",
+      "description": "Default clipping, subtitle styling, watermark, and model preferences for the user.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "defaultDurationPreset": {
+          "type": "string",
+          "enum": ["15-30", "30-60", "60-90", "auto", "custom"]
+        },
+        "defaultOutputFormat": {
+          "type": "string",
+          "enum": ["9:16", "16:9", "1:1"]
+        },
+        "defaultClippingMode": {
+          "type": "string",
+          "enum": ["auto", "manual"]
+        },
+        "defaultPlatforms": {
+          "type": "array"
+        },
+        "defaultSubtitleStyle": {
+          "type": "string",
+          "enum": ["bold_impact", "clean_minimal", "karaoke_gold", "kinetic_blue"]
+        },
+        "subtitleFontSize": {
+          "type": "number"
+        },
+        "subtitleAccentColor": {
+          "type": "string",
+          "maxLength": 7,
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "subtitlePosition": {
+          "type": "string",
+          "enum": ["bottom", "center", "lower_third"]
+        },
+        "subtitleUppercase": {
+          "type": "boolean"
+        },
+        "brandWatermark": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "showWatermark": {
+          "type": "boolean"
+        },
+        "geminiModel": {
+          "type": "string",
+          "enum": ["gemini-4-hydrogen", "gemini-3.1-flash-lite"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "defaultDurationPreset",
+        "defaultOutputFormat",
+        "defaultClippingMode",
+        "defaultPlatforms",
+        "defaultSubtitleStyle",
+        "subtitleFontSize",
+        "subtitleAccentColor",
+        "subtitlePosition",
+        "subtitleUppercase",
+        "brandWatermark",
+        "showWatermark",
+        "geminiModel",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "StudioProject": {
+      "title": "StudioProject",
+      "description": "Video clipping project metadata and AI analysis status.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "channelOrAuthor": {
+          "type": "string",
+          "maxLength": 150
+        },
+        "sourceType": {
+          "type": "string",
+          "enum": ["youtube", "upload"]
+        },
+        "youtubeUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "youtubeVideoId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "localVideoFilename": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "localVideoUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "thumbnailUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "videoDurationSeconds": {
+          "type": "number"
+        },
+        "videoWidth": {
+          "type": "number"
+        },
+        "videoHeight": {
+          "type": "number"
+        },
+        "hasAudioStream": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["processing", "completed", "failed"]
+        },
+        "analysisStage": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "analysisProgress": {
+          "type": "number"
+        },
+        "analysisMessage": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "errorMessage": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "speakersDetected": {
+          "type": "array"
+        },
+        "settings": {
+          "type": "object"
+        },
+        "clipCount": {
+          "type": "number"
+        },
+        "sourceCreatedAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "sourceUpdatedAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "id",
+        "title",
+        "sourceType",
+        "status",
+        "analysisStage",
+        "analysisProgress",
+        "analysisMessage",
+        "settings",
+        "clipCount",
+        "sourceCreatedAt",
+        "sourceUpdatedAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "StudioClip": {
+      "title": "StudioClip",
+      "description": "Clip candidate belonging to a StudioProject.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "index": {
+          "type": "number"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "categoryLabel": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "startSeconds": {
+          "type": "number"
+        },
+        "endSeconds": {
+          "type": "number"
+        },
+        "durationSeconds": {
+          "type": "number"
+        },
+        "score": {
+          "type": "object"
+        },
+        "whyInteresting": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "openingHook": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "socialCaption": {
+          "type": "string",
+          "maxLength": 2200
+        },
+        "platformCaptions": {
+          "type": "object"
+        },
+        "hashtags": {
+          "type": "array"
+        },
+        "speakerCenterX": {
+          "type": "number"
+        },
+        "primarySpeaker": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "selected": {
+          "type": "boolean"
+        },
+        "showHookBanner": {
+          "type": "boolean"
+        },
+        "subtitleStyle": {
+          "type": "string",
+          "enum": ["bold_impact", "clean_minimal", "karaoke_gold", "kinetic_blue"]
+        },
+        "outputFormat": {
+          "type": "string",
+          "enum": ["9:16", "16:9", "1:1"]
+        },
+        "addBackgroundMusic": {
+          "type": "boolean"
+        },
+        "segments": {
+          "type": "array"
+        },
+        "thumbnailUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "renderStatus": {
+          "type": "string",
+          "enum": ["idle", "rendering", "completed", "failed"]
+        },
+        "renderedVideoUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "renderError": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "approved": {
+          "type": "boolean"
+        },
+        "approvedAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "projectId",
+        "id",
+        "index",
+        "title",
+        "categoryLabel",
+        "startSeconds",
+        "endSeconds",
+        "durationSeconds",
+        "score",
+        "whyInteresting",
+        "openingHook",
+        "socialCaption",
+        "platformCaptions",
+        "hashtags",
+        "speakerCenterX",
+        "primarySpeaker",
+        "selected",
+        "showHookBanner",
+        "subtitleStyle",
+        "outputFormat",
+        "addBackgroundMusic",
+        "segments",
+        "renderStatus",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "StudioPublishJob": {
+      "title": "StudioPublishJob",
+      "description": "Multi-platform publishing record and per-platform status.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectTitle": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "clipId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "clipTitle": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "clipThumbnailUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "renderedVideoUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "approvedAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "sourceCreatedAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "sourceUpdatedAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "targets": {
+          "type": "object"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "id",
+        "projectId",
+        "projectTitle",
+        "clipId",
+        "clipTitle",
+        "approvedAt",
+        "sourceCreatedAt",
+        "sourceUpdatedAt",
+        "targets",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserPublicProfile" },
+      "description": "Public display profile for an authenticated creator."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/UserPrivateInfo" },
+      "description": "Private PII document (docId='info') isolated to the owning user."
+    },
+    "/users/{userId}/preferences/{docId}": {
+      "schema": { "$ref": "#/entities/StudioPreferences" },
+      "description": "Synced studio preferences (docId='studio') owned by the user."
+    },
+    "/users/{userId}/projects/{projectId}": {
+      "schema": { "$ref": "#/entities/StudioProject" },
+      "description": "User's video clipping projects."
+    },
+    "/users/{userId}/projects/{projectId}/clips/{clipId}": {
+      "schema": { "$ref": "#/entities/StudioClip" },
+      "description": "Clip candidates belonging to a user's project."
+    },
+    "/users/{userId}/publishJobs/{jobId}": {
+      "schema": { "$ref": "#/entities/StudioPublishJob" },
+      "description": "Publishing queue and platform delivery history for a user."
+    }
+  }
+}

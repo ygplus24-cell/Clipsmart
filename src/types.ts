@@ -2,6 +2,17 @@ export type SourceType = 'youtube' | 'upload';
 
 export type AspectRatioFormat = '9:16' | '16:9' | '1:1';
 
+export type ExportQualityMode = 'best' | 'high_1080p';
+
+export interface ReadyMp4Download {
+  clipId: string;
+  clipTitle: string;
+  url: string;
+  filename: string;
+  fileSizeBytes?: number;
+  quality: ExportQualityMode;
+}
+
 export type DurationPreset = '15-30' | '30-60' | '60-90' | 'auto' | 'custom';
 
 export type ClippingMode = 'auto' | 'manual';

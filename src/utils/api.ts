@@ -115,14 +115,61 @@ export async function fetchApiWithWarmupRetry(
     : new ServerWarmupError('Could not connect to the Express backend server.');
 }
 
+export function buildClipDownloadFilename(clip: {
+  index: number;
+  title: string;
+}): string {
+  const safeTitle = (clip.title || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+  return `clip-${String(clip.index).padStart(2, '0')}-${safeTitle || 'clipgenius'}.mp4`;
+}
+
+export function isClipRenderedForQuality(
+  clip: { renderStatus: string; renderedVideoUrl?: string },
+  quality: 'best' | 'high_1080p'
+): boolean {
+  if (clip.renderStatus !== 'completed' || !clip.renderedVideoUrl) return false;
+  if (quality === 'best') return clip.renderedVideoUrl.includes('_best.mp4');
+  return clip.renderedVideoUrl.includes('_1080p.mp4');
+}
+
+export function triggerNativeAnchorDownload(url: string, filename: string): void {
+  const anchor = document.createElement('a');
+  anchor.href = apiUrl(url);
+  anchor.download = filename;
+  anchor.rel = 'noopener noreferrer';
+  anchor.style.display = 'none';
+  document.body.appendChild(anchor);
+  anchor.click();
+  setTimeout(() => {
+    anchor.remove();
+  }, 1500);
+}
+
 export async function downloadFileFromUrl(
   url: string,
   filename: string
-): Promise<void> {
+): Promise<{ mp4CountHeader: string | null }> {
   const res = await fetch(apiUrl(url), { credentials: 'same-origin' });
   const contentType = (res.headers.get('content-type') || '').toLowerCase();
+  const mp4CountHeader = res.headers.get('x-clipgenius-mp4-count');
   if (!res.ok) {
-    throw new Error(`Download failed (HTTP ${res.status}).`);
+    let serverMessage = `Download failed (HTTP ${res.status}).`;
+    try {
+      const rawText = await res.text();
+      if (contentType.includes('application/json') || rawText.trim().startsWith('{')) {
+        const parsed = JSON.parse(rawText) as { error?: string };
+        if (parsed.error) serverMessage = parsed.error;
+      } else if (rawText.trim() && !rawText.trim().startsWith('<')) {
+        serverMessage = rawText.trim().slice(0, 180);
+      }
+    } catch {
+      // Keep status-based fallback message
+    }
+    throw new Error(serverMessage);
   }
   if (contentType.includes('text/html')) {
     throw new Error(
@@ -137,5 +184,6 @@ export async function downloadFileFromUrl(
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
-  setTimeout(() => URL.revokeObjectURL(objectUrl), 1500);
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 15000);
+  return { mp4CountHeader };
 }

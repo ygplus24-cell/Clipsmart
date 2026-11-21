@@ -237,6 +237,11 @@ export const NewProjectView: React.FC<NewProjectViewProps> = ({
                     className="w-full rounded-lg border border-white/12 bg-[#0B0D12] py-3 pl-10 pr-4 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
                   />
                 </div>
+                <p className="mt-2 text-xs text-amber-300/90">
+                  Note: YouTube URLs generate AI clip timestamps, captions, and .SRT subtitles. To
+                  download cut .MP4 video files, upload the video directly or attach your video file
+                  later in Export/Editor.
+                </p>
               </div>
 
               <div className="flex items-start gap-3 rounded-lg border border-white/8 bg-[#0E1118] p-4 text-xs leading-relaxed text-gray-400">

@@ -1,0 +1,766 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net (Default-Deny Catch-All)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Hardened Global Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidStringList(listVal, maxItems, maxItemLen) {
+      return listVal is list
+        && listVal.size() <= maxItems
+        && (listVal.size() == 0 || (listVal[0] is string && listVal[0].size() <= maxItemLen));
+    }
+
+    // 3. Entity Validation Blueprints
+    function isValidUserPublicProfile(data, userId) {
+      return data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 120
+        && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 500))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserPrivateInfo(data, userId) {
+      return data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && data.email is string
+        && data.email.size() >= 3
+        && data.email.size() <= 254
+        && data.emailVerified is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidStudioPreferences(data, userId) {
+      return data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && data.defaultDurationPreset in ['15-30', '30-60', '60-90', 'auto', 'custom']
+        && data.defaultOutputFormat in ['9:16', '16:9', '1:1']
+        && data.defaultClippingMode in ['auto', 'manual']
+        && isValidStringList(data.defaultPlatforms, 4, 32)
+        && data.defaultSubtitleStyle in ['bold_impact', 'clean_minimal', 'karaoke_gold', 'kinetic_blue']
+        && data.subtitleFontSize is number
+        && data.subtitleFontSize >= 24
+        && data.subtitleFontSize <= 96
+        && data.subtitleAccentColor is string
+        && data.subtitleAccentColor.size() == 7
+        && data.subtitleAccentColor.matches('^#[0-9a-fA-F]{6}$')
+        && data.subtitlePosition in ['bottom', 'center', 'lower_third']
+        && data.subtitleUppercase is bool
+        && data.brandWatermark is string
+        && data.brandWatermark.size() <= 80
+        && data.showWatermark is bool
+        && data.geminiModel in ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidProjectSettingsMap(s) {
+      return s is map
+        && s.keys().hasAll([
+          'durationPreset',
+          'customMinSeconds',
+          'customMaxSeconds',
+          'outputFormat',
+          'clippingMode',
+          'targetPlatforms',
+          'maxClips',
+          'subtitleStyle',
+          'autoFaceTrack',
+          'deduplicateClips',
+          'addHookOverlay',
+          'addBackgroundMusic'
+        ])
+        && s.keys().hasOnly([
+          'durationPreset',
+          'customMinSeconds',
+          'customMaxSeconds',
+          'outputFormat',
+          'clippingMode',
+          'targetPlatforms',
+          'maxClips',
+          'subtitleStyle',
+          'autoFaceTrack',
+          'deduplicateClips',
+          'addHookOverlay',
+          'addBackgroundMusic'
+        ])
+        && s.durationPreset in ['15-30', '30-60', '60-90', 'auto', 'custom']
+        && s.customMinSeconds is number && s.customMinSeconds >= 5 && s.customMinSeconds <= 300
+        && s.customMaxSeconds is number && s.customMaxSeconds >= 5 && s.customMaxSeconds <= 600
+        && s.outputFormat in ['9:16', '16:9', '1:1']
+        && s.clippingMode in ['auto', 'manual']
+        && isValidStringList(s.targetPlatforms, 4, 32)
+        && s.maxClips is number && s.maxClips >= 1 && s.maxClips <= 20
+        && s.subtitleStyle in ['bold_impact', 'clean_minimal', 'karaoke_gold', 'kinetic_blue']
+        && s.autoFaceTrack is bool
+        && s.deduplicateClips is bool
+        && s.addHookOverlay is bool
+        && s.addBackgroundMusic is bool;
+    }
+
+    function isValidStudioProject(data, userId, projectId) {
+      return data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && data.id is string
+        && data.id == projectId
+        && isValidId(data.id)
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 200
+        && (!('channelOrAuthor' in data) || (data.channelOrAuthor is string && data.channelOrAuthor.size() <= 150))
+        && data.sourceType in ['youtube', 'upload']
+        && (!('youtubeUrl' in data) || (data.youtubeUrl is string && data.youtubeUrl.size() <= 500))
+        && (!('youtubeVideoId' in data) || (data.youtubeVideoId is string && data.youtubeVideoId.size() <= 64))
+        && (!('localVideoFilename' in data) || (data.localVideoFilename is string && data.localVideoFilename.size() <= 256))
+        && (!('localVideoUrl' in data) || (data.localVideoUrl is string && data.localVideoUrl.size() <= 500))
+        && (!('thumbnailUrl' in data) || (data.thumbnailUrl is string && data.thumbnailUrl.size() <= 500))
+        && (!('videoDurationSeconds' in data) || (data.videoDurationSeconds is number && data.videoDurationSeconds >= 0 && data.videoDurationSeconds <= 86400))
+        && (!('videoWidth' in data) || (data.videoWidth is number && data.videoWidth >= 0 && data.videoWidth <= 10000))
+        && (!('videoHeight' in data) || (data.videoHeight is number && data.videoHeight >= 0 && data.videoHeight <= 10000))
+        && (!('hasAudioStream' in data) || data.hasAudioStream is bool)
+        && data.status in ['processing', 'completed', 'failed']
+        && data.analysisStage in [
+          'queued',
+          'probing_media',
+          'uploading_to_ai',
+          'analyzing_video',
+          'transcribing_speech',
+          'scoring_moments',
+          'extracting_thumbnails',
+          'completed',
+          'failed'
+        ]
+        && data.analysisProgress is number
+        && data.analysisProgress >= 0
+        && data.analysisProgress <= 100
+        && data.analysisMessage is string
+        && data.analysisMessage.size() <= 500
+        && (!('errorMessage' in data) || (data.errorMessage is string && data.errorMessage.size() <= 1000))
+        && (!('summary' in data) || (data.summary is string && data.summary.size() <= 2000))
+        && (!('speakersDetected' in data) || isValidStringList(data.speakersDetected, 20, 100))
+        && isValidProjectSettingsMap(data.settings)
+        && data.clipCount is number
+        && data.clipCount >= 0
+        && data.clipCount <= 100
+        && data.sourceCreatedAt is string && data.sourceCreatedAt.size() <= 64
+        && data.sourceUpdatedAt is string && data.sourceUpdatedAt.size() <= 64
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidScoreMap(score) {
+      return score is map
+        && score.keys().hasAll([
+          'openingHook',
+          'emotionalReaction',
+          'interestingConversation',
+          'humorOrSurprise',
+          'educationalValue',
+          'standaloneContext',
+          'strongEnding',
+          'total'
+        ])
+        && score.keys().hasOnly([
+          'openingHook',
+          'emotionalReaction',
+          'interestingConversation',
+          'humorOrSurprise',
+          'educationalValue',
+          'standaloneContext',
+          'strongEnding',
+          'total'
+        ])
+        && score.openingHook is number && score.openingHook >= 0 && score.openingHook <= 20
+        && score.emotionalReaction is number && score.emotionalReaction >= 0 && score.emotionalReaction <= 20
+        && score.interestingConversation is number && score.interestingConversation >= 0 && score.interestingConversation <= 15
+        && score.humorOrSurprise is number && score.humorOrSurprise >= 0 && score.humorOrSurprise <= 15
+        && score.educationalValue is number && score.educationalValue >= 0 && score.educationalValue <= 10
+        && score.standaloneContext is number && score.standaloneContext >= 0 && score.standaloneContext <= 10
+        && score.strongEnding is number && score.strongEnding >= 0 && score.strongEnding <= 10
+        && score.total is number && score.total >= 0 && score.total <= 100;
+    }
+
+    function isValidPlatformCaptionsMap(pc) {
+      return pc is map
+        && pc.keys().hasAll(['tiktok', 'youtube_shorts', 'instagram_reels', 'facebook'])
+        && pc.keys().hasOnly(['tiktok', 'youtube_shorts', 'instagram_reels', 'facebook'])
+        && pc.tiktok is string && pc.tiktok.size() <= 2200
+        && pc.youtube_shorts is string && pc.youtube_shorts.size() <= 2200
+        && pc.instagram_reels is string && pc.instagram_reels.size() <= 2200
+        && pc.facebook is string && pc.facebook.size() <= 2200;
+    }
+
+    function isValidStudioClip(data, userId, projectId, clipId) {
+      return data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && data.projectId is string
+        && data.projectId == projectId
+        && isValidId(data.projectId)
+        && data.id is string
+        && data.id == clipId
+        && isValidId(data.id)
+        && data.index is number && data.index >= 1 && data.index <= 200
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && data.categoryLabel is string && data.categoryLabel.size() <= 80
+        && data.startSeconds is number && data.startSeconds >= 0 && data.startSeconds <= 86400
+        && data.endSeconds is number && data.endSeconds > data.startSeconds && data.endSeconds <= 86400
+        && data.durationSeconds is number && data.durationSeconds >= 1 && data.durationSeconds <= 1800
+        && isValidScoreMap(data.score)
+        && data.whyInteresting is string && data.whyInteresting.size() <= 1000
+        && data.openingHook is string && data.openingHook.size() <= 300
+        && data.socialCaption is string && data.socialCaption.size() <= 2200
+        && isValidPlatformCaptionsMap(data.platformCaptions)
+        && isValidStringList(data.hashtags, 25, 64)
+        && data.speakerCenterX is number && data.speakerCenterX >= 0 && data.speakerCenterX <= 1
+        && data.primarySpeaker is string && data.primarySpeaker.size() <= 100
+        && data.selected is bool
+        && data.showHookBanner is bool
+        && data.subtitleStyle in ['bold_impact', 'clean_minimal', 'karaoke_gold', 'kinetic_blue']
+        && data.outputFormat in ['9:16', '16:9', '1:1']
+        && data.addBackgroundMusic is bool
+        && data.segments is list
+        && data.segments.size() <= 120
+        && (data.segments.size() == 0 || (
+          data.segments[0] is map
+          && data.segments[0].text is string && data.segments[0].text.size() <= 500
+          && data.segments[0].speaker is string && data.segments[0].speaker.size() <= 100
+        ))
+        && (!('thumbnailUrl' in data) || (data.thumbnailUrl is string && data.thumbnailUrl.size() <= 500))
+        && data.renderStatus in ['idle', 'rendering', 'completed', 'failed']
+        && (!('renderedVideoUrl' in data) || (data.renderedVideoUrl is string && data.renderedVideoUrl.size() <= 500))
+        && (!('renderError' in data) || (data.renderError is string && data.renderError.size() <= 1000))
+        && (!('approved' in data) || data.approved is bool)
+        && (!('approvedAt' in data) || (data.approvedAt is string && data.approvedAt.size() <= 64))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPublishTarget(t, expectedPlatform) {
+      return t is map
+        && t.keys().hasAll([
+          'platform',
+          'enabled',
+          'title',
+          'caption',
+          'hashtags',
+          'privacy',
+          'scheduleMode',
+          'status',
+          'progress',
+          'updatedAt'
+        ])
+        && t.keys().hasOnly([
+          'platform',
+          'enabled',
+          'title',
+          'caption',
+          'hashtags',
+          'privacy',
+          'scheduleMode',
+          'scheduledAt',
+          'status',
+          'progress',
+          'publishedUrl',
+          'remotePostId',
+          'errorMessage',
+          'updatedAt'
+        ])
+        && t.platform == expectedPlatform
+        && t.enabled is bool
+        && t.title is string && t.title.size() <= 200
+        && t.caption is string && t.caption.size() <= 2200
+        && isValidStringList(t.hashtags, 25, 64)
+        && t.privacy in ['public', 'unlisted', 'private']
+        && t.scheduleMode in ['now', 'scheduled']
+        && (!('scheduledAt' in t) || (t.scheduledAt is string && t.scheduledAt.size() <= 64))
+        && t.status in ['pending', 'scheduled', 'uploading', 'processing', 'published', 'failed', 'auth_expired']
+        && t.progress is number && t.progress >= 0 && t.progress <= 100
+        && (!('publishedUrl' in t) || (t.publishedUrl is string && t.publishedUrl.size() <= 500))
+        && (!('remotePostId' in t) || (t.remotePostId is string && t.remotePostId.size() <= 200))
+        && (!('errorMessage' in t) || (t.errorMessage is string && t.errorMessage.size() <= 1000))
+        && t.updatedAt is string && t.updatedAt.size() <= 64;
+    }
+
+    function isValidStudioPublishJob(data, userId, jobId) {
+      return data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && data.id is string
+        && data.id == jobId
+        && isValidId(data.id)
+        && data.projectId is string && isValidId(data.projectId)
+        && data.projectTitle is string && data.projectTitle.size() <= 200
+        && data.clipId is string && isValidId(data.clipId)
+        && data.clipTitle is string && data.clipTitle.size() <= 200
+        && (!('clipThumbnailUrl' in data) || (data.clipThumbnailUrl is string && data.clipThumbnailUrl.size() <= 500))
+        && (!('renderedVideoUrl' in data) || (data.renderedVideoUrl is string && data.renderedVideoUrl.size() <= 500))
+        && data.approvedAt is string && data.approvedAt.size() <= 64
+        && data.sourceCreatedAt is string && data.sourceCreatedAt.size() <= 64
+        && data.sourceUpdatedAt is string && data.sourceUpdatedAt.size() <= 64
+        && data.targets is map
+        && data.targets.keys().hasAll(['youtube_shorts', 'tiktok', 'instagram_reels'])
+        && data.targets.keys().hasOnly(['youtube_shorts', 'tiktok', 'instagram_reels'])
+        && isValidPublishTarget(data.targets.youtube_shorts, 'youtube_shorts')
+        && isValidPublishTarget(data.targets.tiktok, 'tiktok')
+        && isValidPublishTarget(data.targets.instagram_reels, 'instagram_reels')
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // 4. Collection Match Rules
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+      allow create: if isVerified()
+        && isValidId(userId)
+        && isOwner(userId)
+        && incoming().keys().hasAll(['ownerId', 'displayName', 'createdAt', 'updatedAt'])
+        && incoming().keys().hasOnly(['ownerId', 'displayName', 'photoURL', 'createdAt', 'updatedAt'])
+        && isValidUserPublicProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerified()
+        && isValidId(userId)
+        && isOwner(userId)
+        && isValidUserPublicProfile(incoming(), userId)
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'updatedAt']);
+      allow delete: if false;
+
+      // Isolated Private PII Subcollection
+      match /private/{docId} {
+        allow get: if isValidId(userId) && docId == 'info' && isOwner(userId);
+        allow list: if false;
+        allow create: if isVerified()
+          && isValidId(userId)
+          && docId == 'info'
+          && isOwner(userId)
+          && incoming().keys().hasAll(['ownerId', 'email', 'emailVerified', 'createdAt', 'updatedAt'])
+          && incoming().keys().hasOnly(['ownerId', 'email', 'emailVerified', 'createdAt', 'updatedAt'])
+          && isValidUserPrivateInfo(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isVerified()
+          && isValidId(userId)
+          && docId == 'info'
+          && isOwner(userId)
+          && isValidUserPrivateInfo(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'emailVerified', 'updatedAt']);
+        allow delete: if false;
+      }
+
+      // Synced Studio Preferences
+      match /preferences/{docId} {
+        allow get: if isValidId(userId) && docId == 'studio' && isOwner(userId);
+        allow list: if false;
+        allow create: if isVerified()
+          && isValidId(userId)
+          && docId == 'studio'
+          && isOwner(userId)
+          && incoming().keys().hasAll([
+            'ownerId',
+            'defaultDurationPreset',
+            'defaultOutputFormat',
+            'defaultClippingMode',
+            'defaultPlatforms',
+            'defaultSubtitleStyle',
+            'subtitleFontSize',
+            'subtitleAccentColor',
+            'subtitlePosition',
+            'subtitleUppercase',
+            'brandWatermark',
+            'showWatermark',
+            'geminiModel',
+            'createdAt',
+            'updatedAt'
+          ])
+          && incoming().keys().hasOnly([
+            'ownerId',
+            'defaultDurationPreset',
+            'defaultOutputFormat',
+            'defaultClippingMode',
+            'defaultPlatforms',
+            'defaultSubtitleStyle',
+            'subtitleFontSize',
+            'subtitleAccentColor',
+            'subtitlePosition',
+            'subtitleUppercase',
+            'brandWatermark',
+            'showWatermark',
+            'geminiModel',
+            'createdAt',
+            'updatedAt'
+          ])
+          && isValidStudioPreferences(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isVerified()
+          && isValidId(userId)
+          && docId == 'studio'
+          && isOwner(userId)
+          && isValidStudioPreferences(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'defaultDurationPreset',
+            'defaultOutputFormat',
+            'defaultClippingMode',
+            'defaultPlatforms',
+            'defaultSubtitleStyle',
+            'subtitleFontSize',
+            'subtitleAccentColor',
+            'subtitlePosition',
+            'subtitleUppercase',
+            'brandWatermark',
+            'showWatermark',
+            'geminiModel',
+            'updatedAt'
+          ]);
+        allow delete: if false;
+      }
+
+      // User Projects
+      match /projects/{projectId} {
+        allow get: if isValidId(userId) && isValidId(projectId) && isOwner(userId);
+        allow list: if isOwner(userId) && existing().ownerId == request.auth.uid;
+        allow create: if isVerified()
+          && isValidId(userId)
+          && isValidId(projectId)
+          && isOwner(userId)
+          && incoming().keys().hasAll([
+            'ownerId',
+            'id',
+            'title',
+            'sourceType',
+            'status',
+            'analysisStage',
+            'analysisProgress',
+            'analysisMessage',
+            'settings',
+            'clipCount',
+            'sourceCreatedAt',
+            'sourceUpdatedAt',
+            'createdAt',
+            'updatedAt'
+          ])
+          && incoming().keys().hasOnly([
+            'ownerId',
+            'id',
+            'title',
+            'channelOrAuthor',
+            'sourceType',
+            'youtubeUrl',
+            'youtubeVideoId',
+            'localVideoFilename',
+            'localVideoUrl',
+            'thumbnailUrl',
+            'videoDurationSeconds',
+            'videoWidth',
+            'videoHeight',
+            'hasAudioStream',
+            'status',
+            'analysisStage',
+            'analysisProgress',
+            'analysisMessage',
+            'errorMessage',
+            'summary',
+            'speakersDetected',
+            'settings',
+            'clipCount',
+            'sourceCreatedAt',
+            'sourceUpdatedAt',
+            'createdAt',
+            'updatedAt'
+          ])
+          && isValidStudioProject(incoming(), userId, projectId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isVerified()
+          && isValidId(userId)
+          && isValidId(projectId)
+          && isOwner(userId)
+          && isValidStudioProject(incoming(), userId, projectId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().id == existing().id
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'title',
+              'channelOrAuthor',
+              'localVideoFilename',
+              'localVideoUrl',
+              'thumbnailUrl',
+              'videoDurationSeconds',
+              'videoWidth',
+              'videoHeight',
+              'hasAudioStream',
+              'status',
+              'analysisStage',
+              'analysisProgress',
+              'analysisMessage',
+              'errorMessage',
+              'summary',
+              'speakersDetected',
+              'settings',
+              'clipCount',
+              'sourceUpdatedAt',
+              'updatedAt'
+            ])
+          );
+        allow delete: if isVerified()
+          && isValidId(userId)
+          && isValidId(projectId)
+          && isOwner(userId)
+          && existing().ownerId == request.auth.uid;
+
+        // Clips Subcollection (Master Gate checks parent project ownership)
+        match /clips/{clipId} {
+          allow get: if isValidId(userId)
+            && isValidId(projectId)
+            && isValidId(clipId)
+            && isOwner(userId)
+            && get(/databases/$(database)/documents/users/$(userId)/projects/$(projectId)).data.ownerId == request.auth.uid;
+          allow list: if isOwner(userId)
+            && existing().ownerId == request.auth.uid
+            && existing().projectId == projectId;
+          allow create: if isVerified()
+            && isValidId(userId)
+            && isValidId(projectId)
+            && isValidId(clipId)
+            && isOwner(userId)
+            && incoming().keys().hasAll([
+              'ownerId',
+              'projectId',
+              'id',
+              'index',
+              'title',
+              'categoryLabel',
+              'startSeconds',
+              'endSeconds',
+              'durationSeconds',
+              'score',
+              'whyInteresting',
+              'openingHook',
+              'socialCaption',
+              'platformCaptions',
+              'hashtags',
+              'speakerCenterX',
+              'primarySpeaker',
+              'selected',
+              'showHookBanner',
+              'subtitleStyle',
+              'outputFormat',
+              'addBackgroundMusic',
+              'segments',
+              'renderStatus',
+              'createdAt',
+              'updatedAt'
+            ])
+            && incoming().keys().hasOnly([
+              'ownerId',
+              'projectId',
+              'id',
+              'index',
+              'title',
+              'categoryLabel',
+              'startSeconds',
+              'endSeconds',
+              'durationSeconds',
+              'score',
+              'whyInteresting',
+              'openingHook',
+              'socialCaption',
+              'platformCaptions',
+              'hashtags',
+              'speakerCenterX',
+              'primarySpeaker',
+              'selected',
+              'showHookBanner',
+              'subtitleStyle',
+              'outputFormat',
+              'addBackgroundMusic',
+              'segments',
+              'thumbnailUrl',
+              'renderStatus',
+              'renderedVideoUrl',
+              'renderError',
+              'approved',
+              'approvedAt',
+              'createdAt',
+              'updatedAt'
+            ])
+            && isValidStudioClip(incoming(), userId, projectId, clipId)
+            && incoming().createdAt == request.time
+            && incoming().updatedAt == request.time
+            && exists(/databases/$(database)/documents/users/$(userId)/projects/$(projectId))
+            && get(/databases/$(database)/documents/users/$(userId)/projects/$(projectId)).data.ownerId == request.auth.uid;
+          allow update: if isVerified()
+            && isValidId(userId)
+            && isValidId(projectId)
+            && isValidId(clipId)
+            && isOwner(userId)
+            && isValidStudioClip(incoming(), userId, projectId, clipId)
+            && incoming().ownerId == existing().ownerId
+            && incoming().projectId == existing().projectId
+            && incoming().id == existing().id
+            && incoming().createdAt == existing().createdAt
+            && incoming().updatedAt == request.time
+            && get(/databases/$(database)/documents/users/$(userId)/projects/$(projectId)).data.ownerId == request.auth.uid
+            && (
+              // Action: Edit clip trim, captions, styling, selection, or render state
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'index',
+                'title',
+                'categoryLabel',
+                'startSeconds',
+                'endSeconds',
+                'durationSeconds',
+                'score',
+                'whyInteresting',
+                'openingHook',
+                'socialCaption',
+                'platformCaptions',
+                'hashtags',
+                'speakerCenterX',
+                'primarySpeaker',
+                'selected',
+                'showHookBanner',
+                'subtitleStyle',
+                'outputFormat',
+                'addBackgroundMusic',
+                'segments',
+                'thumbnailUrl',
+                'renderStatus',
+                'renderedVideoUrl',
+                'renderError',
+                'approved',
+                'approvedAt',
+                'updatedAt'
+              ])
+            );
+          allow delete: if isVerified()
+            && isValidId(userId)
+            && isValidId(projectId)
+            && isValidId(clipId)
+            && isOwner(userId)
+            && get(/databases/$(database)/documents/users/$(userId)/projects/$(projectId)).data.ownerId == request.auth.uid;
+        }
+      }
+
+      // Multi-Platform Publish History & Queue
+      match /publishJobs/{jobId} {
+        allow get: if isValidId(userId) && isValidId(jobId) && isOwner(userId);
+        allow list: if isOwner(userId) && existing().ownerId == request.auth.uid;
+        allow create: if isVerified()
+          && isValidId(userId)
+          && isValidId(jobId)
+          && isOwner(userId)
+          && incoming().keys().hasAll([
+            'ownerId',
+            'id',
+            'projectId',
+            'projectTitle',
+            'clipId',
+            'clipTitle',
+            'approvedAt',
+            'sourceCreatedAt',
+            'sourceUpdatedAt',
+            'targets',
+            'createdAt',
+            'updatedAt'
+          ])
+          && incoming().keys().hasOnly([
+            'ownerId',
+            'id',
+            'projectId',
+            'projectTitle',
+            'clipId',
+            'clipTitle',
+            'clipThumbnailUrl',
+            'renderedVideoUrl',
+            'approvedAt',
+            'sourceCreatedAt',
+            'sourceUpdatedAt',
+            'targets',
+            'createdAt',
+            'updatedAt'
+          ])
+          && isValidStudioPublishJob(incoming(), userId, jobId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId)/projects/$(incoming().projectId));
+        allow update: if isVerified()
+          && isValidId(userId)
+          && isValidId(jobId)
+          && isOwner(userId)
+          && isValidStudioPublishJob(incoming(), userId, jobId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().id == existing().id
+          && incoming().projectId == existing().projectId
+          && incoming().clipId == existing().clipId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'clipThumbnailUrl',
+            'renderedVideoUrl',
+            'sourceUpdatedAt',
+            'targets',
+            'updatedAt'
+          ]);
+        allow delete: if isVerified()
+          && isValidId(userId)
+          && isValidId(jobId)
+          && isOwner(userId)
+          && existing().ownerId == request.auth.uid;
+      }
+    }
+  }
+}

@@ -1,7 +1,6 @@
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, MediaResolution, Type } from '@google/genai';
 import { ZipArchive } from 'archiver';
 import { execFile } from 'child_process';
-import dotenv from 'dotenv';
 import express from 'express';
 import fs from 'fs';
 import http from 'http';
@@ -17,9 +16,14 @@ import type {
   SubtitleStylePreset,
   TranscriptSegment,
 } from './src/types.ts';
+import {
+  autoConnectEnvironment,
+  bindCanonicalEnvAliases,
+  readFirstRealEnv,
+} from './server/env.ts';
 import { registerPublishingRoutes } from './server/publishing.ts';
 
-dotenv.config();
+bindCanonicalEnvAliases();
 
 const execFileAsync = promisify(execFile);
 
@@ -132,8 +136,14 @@ function updateProjectInStore(
 }
 
 function createGeminiClient(): GoogleGenAI {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+  bindCanonicalEnvAliases();
+  const apiKey = readFirstRealEnv(
+    'GEMINI_API_KEY',
+    'GOOGLE_GENERATIVE_AI_API_KEY',
+    'GOOGLE_API_KEY',
+    'API_KEY'
+  );
+  if (!apiKey) {
     throw new Error(
       'GEMINI_API_KEY is not configured. Please add your Gemini API key in Settings > Secrets.'
     );
@@ -301,9 +311,9 @@ async function extractThumbnailFrame(
       '-frames:v',
       '1',
       '-vf',
-      'scale=640:-2',
+      'scale=1280:-2:flags=lanczos',
       '-q:v',
-      '3',
+      '2',
       outPath,
     ]);
     if (fs.existsSync(outPath)) {
@@ -331,16 +341,29 @@ function getDurationRangeText(settings: ProjectSettings): string {
   }
 }
 
-function buildAnalysisPrompt(settings: ProjectSettings, durationHint?: number): string {
-  const durationClause = durationHint
-    ? `The total video duration is approximately ${durationHint} seconds. Never output timestamps exceeding ${durationHint} seconds.`
-    : 'Ensure all timestamps accurately reflect the actual video timeline.';
+function buildAnalysisPrompt(
+  settings: ProjectSettings,
+  durationHint?: number,
+  windowInfo?: { startSeconds: number; endSeconds: number; clipCountOverride?: number }
+): string {
+  const targetCount = windowInfo?.clipCountOverride
+    ? Math.max(2, windowInfo.clipCountOverride)
+    : Math.min(12, Math.max(4, settings.maxClips));
+  const minCount = windowInfo?.clipCountOverride ? 1 : Math.min(4, targetCount);
+
+  let durationClause = 'Ensure all timestamps accurately reflect the actual video timeline.';
+  if (windowInfo) {
+    const windowDur = Math.max(10, windowInfo.endSeconds - windowInfo.startSeconds);
+    durationClause = `You are inspecting a segment of the full video spanning ${windowDur} seconds (from ${windowInfo.startSeconds}s to ${windowInfo.endSeconds}s). Report all startSeconds and endSeconds RELATIVE to the start of this segment (between 0 and ${windowDur} seconds).`;
+  } else if (durationHint) {
+    durationClause = `The total video duration is approximately ${durationHint} seconds. Never output timestamps exceeding ${durationHint} seconds.`;
+  }
 
   return `You are an expert short-form viral video producer and editor for TikTok, YouTube Shorts, Instagram Reels, and Facebook Reels.
 Analyze the provided video carefully (visuals, facial expressions, emotional tone, speaker turns, speech content, humor, surprises, and educational insights).
 ${durationClause}
 
-Select between 4 and ${Math.min(12, Math.max(4, settings.maxClips))} distinct, non-overlapping high-retention viral moments.
+Select between ${minCount} and ${targetCount} distinct, non-overlapping high-retention viral moments.
 Target clip length: ${getDurationRangeText(settings)}.
 ${settings.deduplicateClips ? 'Ensure zero duplicate or overlapping topics across clips.' : ''}
 
@@ -581,6 +604,327 @@ function normalizeClipsFromAi(
   return mapped.map((c, i) => ({ ...c, index: i + 1 }));
 }
 
+function parseTokenLimitError(err: unknown): {
+  isTokenLimit: boolean;
+  inputTokens?: number;
+  maxTokens?: number;
+} {
+  const raw = err instanceof Error ? err.message : String(err);
+  if (!/maximum number of tokens allowed|input token count/i.test(raw)) {
+    return { isTokenLimit: false };
+  }
+  const maxMatch = raw.match(/tokens allowed \((\d+)\)/i);
+  const inputMatch = raw.match(/input token count:\s*(\d+)/i);
+  return {
+    isTokenLimit: true,
+    maxTokens: maxMatch ? Number(maxMatch[1]) : 1048576,
+    inputTokens: inputMatch ? Number(inputMatch[1]) : undefined,
+  };
+}
+
+function formatGeminiErrorMessage(err: unknown, fallback: string): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  try {
+    const parsed = JSON.parse(raw) as {
+      error?: { message?: string; code?: number; status?: string };
+    };
+    if (parsed?.error?.message) {
+      return parsed.error.message;
+    }
+  } catch {
+    // Check if an embedded JSON error string exists inside the SDK message
+    const jsonStart = raw.indexOf('{');
+    if (jsonStart >= 0) {
+      try {
+        const parsed = JSON.parse(raw.slice(jsonStart)) as {
+          error?: { message?: string };
+        };
+        if (parsed?.error?.message) {
+          return parsed.error.message;
+        }
+      } catch {
+        // Not valid JSON
+      }
+    }
+  }
+  return raw || fallback;
+}
+
+interface ParsedAnalysisResult {
+  summary: string;
+  speakersDetected: string[];
+  clips: RawAiClip[];
+}
+
+function offsetWindowClips(
+  clips: RawAiClip[],
+  windowStart: number,
+  windowEnd: number
+): RawAiClip[] {
+  const windowDur = Math.max(10, windowEnd - windowStart);
+  return clips.map((clip) => {
+    // If Gemini returned timestamps relative to the segment [0..windowDur], shift by windowStart
+    const looksRelative =
+      windowStart > 0 && clip.endSeconds <= windowDur + 15 && clip.startSeconds < windowStart;
+    const shift = looksRelative ? windowStart : 0;
+    return {
+      ...clip,
+      startSeconds: clip.startSeconds + shift,
+      endSeconds: clip.endSeconds + shift,
+      segments: (clip.segments || []).map((seg) => ({
+        ...seg,
+        startSeconds: seg.startSeconds + shift,
+        endSeconds: seg.endSeconds + shift,
+      })),
+    };
+  });
+}
+
+function rankRawClip(c: RawAiClip): number {
+  return (
+    (c.openingHookScore || 0) +
+    (c.emotionalReactionScore || 0) +
+    (c.interestingConversationScore || 0) +
+    (c.humorOrSurpriseScore || 0) +
+    (c.educationalValueScore || 0) +
+    (c.standaloneContextScore || 0) +
+    (c.strongEndingScore || 0)
+  );
+}
+
+async function analyzeMediaWithTokenBudget(params: {
+  ai: GoogleGenAI;
+  model: string | undefined;
+  fileUri: string;
+  mimeType?: string;
+  settings: ProjectSettings;
+  durationSeconds?: number;
+  onProgress: (stageMessage: string, progress?: number) => void;
+}): Promise<ParsedAnalysisResult> {
+  const { ai, model, fileUri, mimeType, settings, durationSeconds, onProgress } = params;
+
+  const runWindow = async (opts: {
+    lowRes: boolean;
+    fps?: number;
+    startSeconds?: number;
+    endSeconds?: number;
+    clipCountOverride?: number;
+  }): Promise<ParsedAnalysisResult> => {
+    const windowInfo =
+      typeof opts.startSeconds === 'number' && typeof opts.endSeconds === 'number'
+        ? {
+            startSeconds: opts.startSeconds,
+            endSeconds: opts.endSeconds,
+            clipCountOverride: opts.clipCountOverride,
+          }
+        : undefined;
+
+    const prompt = buildAnalysisPrompt(settings, durationSeconds, windowInfo);
+    const videoMetadata: {
+      startOffset?: string;
+      endOffset?: string;
+      fps?: number;
+    } = {};
+
+    if (typeof opts.fps === 'number') {
+      videoMetadata.fps = opts.fps;
+    }
+    if (windowInfo) {
+      videoMetadata.startOffset = `${Math.max(0, Math.floor(windowInfo.startSeconds))}s`;
+      videoMetadata.endOffset = `${Math.max(
+        Math.floor(windowInfo.startSeconds) + 10,
+        Math.ceil(windowInfo.endSeconds)
+      )}s`;
+    }
+
+    const filePart: {
+      fileData: { fileUri: string; mimeType?: string };
+      videoMetadata?: { startOffset?: string; endOffset?: string; fps?: number };
+    } = {
+      fileData: mimeType ? { fileUri, mimeType } : { fileUri },
+    };
+    if (Object.keys(videoMetadata).length > 0) {
+      filePart.videoMetadata = videoMetadata;
+    }
+
+    const response = await generateContentWithFallback(ai, model, {
+      contents: [filePart, { text: prompt }],
+      config: {
+        ...(opts.lowRes ? { mediaResolution: MediaResolution.MEDIA_RESOLUTION_LOW } : {}),
+        responseMimeType: 'application/json',
+        responseSchema: ANALYSIS_RESPONSE_SCHEMA,
+      },
+    });
+
+    const parsed = parseModelJson<{
+      summary?: string;
+      speakersDetected?: string[];
+      clips?: RawAiClip[];
+    }>(response.text);
+
+    const rawClips = Array.isArray(parsed.clips) ? parsed.clips : [];
+    const adjustedClips = windowInfo
+      ? offsetWindowClips(rawClips, windowInfo.startSeconds, windowInfo.endSeconds)
+      : rawClips;
+
+    return {
+      summary: parsed.summary || 'Analysis complete.',
+      speakersDetected: Array.isArray(parsed.speakersDetected)
+        ? parsed.speakersDetected
+        : ['Speaker 1'],
+      clips: adjustedClips,
+    };
+  };
+
+  const runChunkedAnalysis = async (totalDuration: number): Promise<ParsedAnalysisResult> => {
+    // 40-minute windows at low resolution + 0.5 fps use ~150k tokens each, well within 1M cap
+    const windowSize = 2400;
+    const maxWindows = 6;
+    const windows: Array<{ start: number; end: number }> = [];
+
+    if (totalDuration <= windowSize * maxWindows) {
+      for (let start = 0; start < totalDuration; start += windowSize) {
+        const end = Math.min(totalDuration, start + windowSize);
+        if (end - start >= 30 || windows.length === 0) {
+          windows.push({ start, end });
+        }
+      }
+    } else {
+      const step = Math.floor(totalDuration / maxWindows);
+      for (let i = 0; i < maxWindows; i++) {
+        const start = i * step;
+        const end = Math.min(totalDuration, start + windowSize);
+        windows.push({ start, end });
+      }
+    }
+
+    const perWindowClipTarget = Math.max(
+      2,
+      Math.ceil(Math.min(12, Math.max(4, settings.maxClips)) / windows.length) + 1
+    );
+
+    const summaries: string[] = [];
+    const speakerSet = new Set<string>();
+    const allClips: RawAiClip[] = [];
+    let lastChunkError: unknown;
+
+    for (let i = 0; i < windows.length; i++) {
+      const w = windows[i];
+      const startMin = Math.round(w.start / 60);
+      const endMin = Math.round(w.end / 60);
+      onProgress(
+        `Long-video mode: analyzing segment ${i + 1}/${windows.length} (${startMin}m–${endMin}m) within Gemini token budget...`,
+        Math.min(82, 52 + Math.round(((i + 1) / windows.length) * 28))
+      );
+
+      try {
+        const res = await runWindow({
+          lowRes: true,
+          fps: 0.5,
+          startSeconds: w.start,
+          endSeconds: w.end,
+          clipCountOverride: perWindowClipTarget,
+        });
+        if (res.summary) summaries.push(res.summary);
+        for (const sp of res.speakersDetected) speakerSet.add(sp);
+        allClips.push(...res.clips);
+      } catch (chunkErr) {
+        lastChunkError = chunkErr;
+        const tokenErr = parseTokenLimitError(chunkErr);
+        if (tokenErr.isTokenLimit) {
+          try {
+            // Retry single window at even lower FPS (0.25 fps = 1 frame every 4s)
+            const res = await runWindow({
+              lowRes: true,
+              fps: 0.25,
+              startSeconds: w.start,
+              endSeconds: w.end,
+              clipCountOverride: perWindowClipTarget,
+            });
+            if (res.summary) summaries.push(res.summary);
+            for (const sp of res.speakersDetected) speakerSet.add(sp);
+            allClips.push(...res.clips);
+          } catch (retryErr) {
+            lastChunkError = retryErr;
+            if (windows.length === 1) throw retryErr;
+          }
+        } else if (windows.length === 1) {
+          throw chunkErr;
+        }
+      }
+    }
+
+    if (allClips.length === 0 && lastChunkError) {
+      throw lastChunkError;
+    }
+
+    allClips.sort((a, b) => rankRawClip(b) - rankRawClip(a));
+    const maxWanted = Math.min(12, Math.max(4, settings.maxClips));
+    return {
+      summary: summaries[0] || 'Long-form video analysis complete.',
+      speakersDetected: speakerSet.size > 0 ? Array.from(speakerSet) : ['Speaker 1'],
+      clips: allClips.slice(0, maxWanted),
+    };
+  };
+
+  // Proactive budget choice when duration is already known (uploaded files)
+  if (durationSeconds && durationSeconds > 7200) {
+    return runChunkedAnalysis(durationSeconds);
+  }
+  if (durationSeconds && durationSeconds > 2400) {
+    onProgress(
+      'Long video detected (>40 min). Optimizing frame sampling to fit Gemini context window...',
+      58
+    );
+    try {
+      return await runWindow({ lowRes: true, fps: 0.5 });
+    } catch (err) {
+      if (parseTokenLimitError(err).isTokenLimit) {
+        return runChunkedAnalysis(durationSeconds);
+      }
+      throw err;
+    }
+  }
+
+  // Standard single-pass attempt (with automatic recovery on 1M token overflow)
+  try {
+    return await runWindow({ lowRes: false });
+  } catch (err) {
+    const tokenInfo = parseTokenLimitError(err);
+    if (!tokenInfo.isTokenLimit) {
+      throw err;
+    }
+
+    const tokenLabel = tokenInfo.inputTokens
+      ? `${tokenInfo.inputTokens.toLocaleString()} tokens`
+      : '>1M tokens';
+    onProgress(
+      `Video requires ${tokenLabel} at full resolution. Switching to token-optimized sampling...`,
+      56
+    );
+
+    try {
+      return await runWindow({ lowRes: true, fps: 0.5 });
+    } catch (lowResErr) {
+      const lowTokenInfo = parseTokenLimitError(lowResErr);
+      if (!lowTokenInfo.isTokenLimit) {
+        throw lowResErr;
+      }
+
+      // Ultra-long stream (>3.5+ hours): split into 40-minute windows
+      const estimatedSeconds =
+        durationSeconds ||
+        (lowTokenInfo.inputTokens
+          ? Math.max(7200, Math.round(lowTokenInfo.inputTokens / 60))
+          : tokenInfo.inputTokens
+          ? Math.max(7200, Math.round(tokenInfo.inputTokens / 290))
+          : 10800);
+
+      return runChunkedAnalysis(estimatedSeconds);
+    }
+  }
+}
+
 async function runYoutubeAnalysisPipeline(projectId: string): Promise<void> {
   const projects = readProjects();
   const project = projects.find((p) => p.id === projectId);
@@ -596,7 +940,6 @@ async function runYoutubeAnalysisPipeline(projectId: string): Promise<void> {
     }));
 
     const ai = createGeminiClient();
-    const prompt = buildAnalysisPrompt(project.settings);
 
     updateProjectInStore(projectId, (p) => ({
       ...p,
@@ -605,24 +948,19 @@ async function runYoutubeAnalysisPipeline(projectId: string): Promise<void> {
       analysisMessage: 'Detecting speakers, speech timestamps, hooks, and emotional peaks...',
     }));
 
-    const response = await generateContentWithFallback(
+    const parsed = await analyzeMediaWithTokenBudget({
       ai,
-      appSettings.geminiModel,
-      {
-        contents: [
-          {
-            fileData: {
-              fileUri: project.youtubeUrl,
-            },
-          },
-          { text: prompt },
-        ],
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: ANALYSIS_RESPONSE_SCHEMA,
-        },
-      }
-    );
+      model: appSettings.geminiModel,
+      fileUri: project.youtubeUrl,
+      settings: project.settings,
+      onProgress: (msg, progress) => {
+        updateProjectInStore(projectId, (p) => ({
+          ...p,
+          analysisProgress: progress ?? p.analysisProgress,
+          analysisMessage: msg,
+        }));
+      },
+    });
 
     updateProjectInStore(projectId, (p) => ({
       ...p,
@@ -630,12 +968,6 @@ async function runYoutubeAnalysisPipeline(projectId: string): Promise<void> {
       analysisProgress: 84,
       analysisMessage: 'Scoring viral candidates across the 7-factor retention rubric...',
     }));
-
-    const parsed = parseModelJson<{
-      summary?: string;
-      speakersDetected?: string[];
-      clips?: RawAiClip[];
-    }>(response.text);
 
     const rawClips = Array.isArray(parsed.clips) ? parsed.clips : [];
     if (rawClips.length === 0) {
@@ -663,8 +995,10 @@ async function runYoutubeAnalysisPipeline(projectId: string): Promise<void> {
       clips,
     }));
   } catch (err) {
-    const message =
-      err instanceof Error ? err.message : 'Failed to analyze YouTube URL with Gemini.';
+    const message = formatGeminiErrorMessage(
+      err,
+      'Failed to analyze YouTube URL with Gemini.'
+    );
     updateProjectInStore(projectId, (p) => ({
       ...p,
       status: 'failed',
@@ -750,27 +1084,21 @@ async function runUploadAnalysisPipeline(
       analysisMessage: 'Analyzing scenes, speaker positions, emotional peaks, and hooks...',
     }));
 
-    const prompt = buildAnalysisPrompt(project.settings, mediaInfo.durationSeconds);
-
-    const response = await generateContentWithFallback(
-      aiClient,
-      appSettings.geminiModel,
-      {
-        contents: [
-          {
-            fileData: {
-              fileUri,
-              mimeType,
-            },
-          },
-          { text: prompt },
-        ],
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: ANALYSIS_RESPONSE_SCHEMA,
-        },
-      }
-    );
+    const parsed = await analyzeMediaWithTokenBudget({
+      ai: aiClient,
+      model: appSettings.geminiModel,
+      fileUri,
+      mimeType,
+      settings: project.settings,
+      durationSeconds: mediaInfo.durationSeconds,
+      onProgress: (msg, progress) => {
+        updateProjectInStore(projectId, (p) => ({
+          ...p,
+          analysisProgress: progress ?? p.analysisProgress,
+          analysisMessage: msg,
+        }));
+      },
+    });
 
     updateProjectInStore(projectId, (p) => ({
       ...p,
@@ -778,12 +1106,6 @@ async function runUploadAnalysisPipeline(
       analysisProgress: 82,
       analysisMessage: 'Scoring viral candidates and aligning animated caption timestamps...',
     }));
-
-    const parsed = parseModelJson<{
-      summary?: string;
-      speakersDetected?: string[];
-      clips?: RawAiClip[];
-    }>(response.text);
 
     const rawClips = Array.isArray(parsed.clips) ? parsed.clips : [];
     if (rawClips.length === 0) {
@@ -826,8 +1148,10 @@ async function runUploadAnalysisPipeline(
       clips,
     }));
   } catch (err) {
-    const message =
-      err instanceof Error ? err.message : 'Failed to analyze uploaded video.';
+    const message = formatGeminiErrorMessage(
+      err,
+      'Failed to analyze uploaded video.'
+    );
     updateProjectInStore(projectId, (p) => ({
       ...p,
       status: 'failed',
@@ -885,17 +1209,26 @@ function buildAssContent(
   height: number
 ): string {
   const fontSize = clamp(appSettings.subtitleFontSize || 54, 28, 86);
-  const scaleFactor = width < 1080 ? width / 1080 : 1;
-  const scaledFont = Math.round(fontSize * scaleFactor);
-  const hookFont = Math.round(scaledFont * 0.78);
+  const minDim = Math.min(width, height);
+  const scaleFactor = minDim > 0 ? minDim / 1080 : 1;
+  const scaledFont = Math.max(18, Math.round(fontSize * scaleFactor));
+  const hookFont = Math.max(16, Math.round(scaledFont * 0.78));
+  const watermarkFont = Math.max(16, Math.round(28 * scaleFactor));
+  const marginH = Math.max(32, Math.round(60 * scaleFactor));
+  const hookMarginH = Math.max(36, Math.round(70 * scaleFactor));
+  const watermarkMargin = Math.max(20, Math.round(40 * scaleFactor));
 
   let accentBgr = hexToAssBgr(appSettings.subtitleAccentColor || '#F59E0B');
   if (clip.subtitleStyle === 'kinetic_blue') accentBgr = '&H00F6823B&';
   if (clip.subtitleStyle === 'karaoke_gold') accentBgr = '&H000B9EF5&';
 
   const borderStyle = clip.subtitleStyle === 'clean_minimal' ? 3 : 1;
-  const outlineWidth = clip.subtitleStyle === 'clean_minimal' ? 10 : 4;
-  const shadow = clip.subtitleStyle === 'clean_minimal' ? 0 : 2;
+  const outlineWidth = Math.max(
+    2,
+    Math.round((clip.subtitleStyle === 'clean_minimal' ? 10 : 4) * scaleFactor)
+  );
+  const shadow =
+    clip.subtitleStyle === 'clean_minimal' ? 0 : Math.max(1, Math.round(2 * scaleFactor));
   const alignment =
     appSettings.subtitlePosition === 'center'
       ? 5
@@ -918,11 +1251,15 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,DejaVu Sans,${scaledFont},&H00FFFFFF&,${accentBgr},&H00080A0F&,&H96000000&,-1,0,0,0,100,100,0,0,${borderStyle},${outlineWidth},${shadow},${alignment},60,60,${marginV},1
-Style: HookBanner,DejaVu Sans,${hookFont},&H00FFFFFF&,&H00FFFFFF&,&H00080A0F&,&HC8111827&,-1,0,0,0,100,100,0,0,3,14,0,8,70,70,${Math.round(
-    height * 0.1
-  )},1
-Style: Watermark,DejaVu Sans,28,&H88E5E7EB&,&H88E5E7EB&,&H88000000&,&H00000000&,0,0,0,0,100,100,1,0,1,2,0,9,40,40,40,1
+Style: Default,DejaVu Sans,${scaledFont},&H00FFFFFF&,${accentBgr},&H00080A0F&,&H96000000&,-1,0,0,0,100,100,0,0,${borderStyle},${outlineWidth},${shadow},${alignment},${marginH},${marginH},${marginV},1
+Style: HookBanner,DejaVu Sans,${hookFont},&H00FFFFFF&,&H00FFFFFF&,&H00080A0F&,&HC8111827&,-1,0,0,0,100,100,0,0,3,${Math.max(
+    8,
+    Math.round(14 * scaleFactor)
+  )},0,8,${hookMarginH},${hookMarginH},${Math.round(height * 0.1)},1
+Style: Watermark,DejaVu Sans,${watermarkFont},&H88E5E7EB&,&H88E5E7EB&,&H88000000&,&H00000000&,0,0,0,0,100,100,1,0,1,${Math.max(
+    1,
+    Math.round(2 * scaleFactor)
+  )},0,9,${watermarkMargin},${watermarkMargin},${watermarkMargin},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -981,16 +1318,57 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
   return header + lines.join('\n') + '\n';
 }
 
-function getOutputDimensions(format: AspectRatioFormat): { width: number; height: number } {
-  if (format === '16:9') return { width: 1920, height: 1080 };
-  if (format === '1:1') return { width: 1080, height: 1080 };
+type ExportQualityMode = 'best' | 'high_1080p';
+
+function normalizeQualityMode(raw: unknown): ExportQualityMode {
+  return raw === 'high_1080p' ? 'high_1080p' : 'best';
+}
+
+function roundEven(n: number): number {
+  return Math.max(2, Math.round(n) & ~1);
+}
+
+function getOutputDimensions(
+  format: AspectRatioFormat,
+  srcW = 1920,
+  srcH = 1080,
+  quality: ExportQualityMode = 'best'
+): { width: number; height: number } {
+  if (quality === 'high_1080p') {
+    if (format === '16:9') return { width: 1920, height: 1080 };
+    if (format === '1:1') return { width: 1080, height: 1080 };
+    return { width: 1080, height: 1920 };
+  }
+
+  // Best Quality: preserve high-res 1440p / 4K source detail without downscaling
+  if (format === '16:9') {
+    if (srcW >= 3840 || srcH >= 2160) return { width: 3840, height: 2160 };
+    if (srcW >= 2560 || srcH >= 1440) return { width: 2560, height: 1440 };
+    return { width: 1920, height: 1080 };
+  }
+
+  if (format === '1:1') {
+    const minSrc = Math.min(srcW, srcH);
+    if (minSrc >= 2160) return { width: 2160, height: 2160 };
+    if (minSrc >= 1440) return { width: 1440, height: 1440 };
+    return { width: 1080, height: 1080 };
+  }
+
+  // 9:16 vertical: preserve native 4K vertical (2160x3840) or 4K-height landscape crop (1216x2160)
+  if (srcW >= 2160 && srcH >= 3840) {
+    return { width: 2160, height: 3840 };
+  }
+  if (srcH >= 2160) {
+    return { width: roundEven((2160 * 9) / 16), height: 2160 };
+  }
   return { width: 1080, height: 1920 };
 }
 
 async function renderClipWithFfmpeg(
   project: Project,
   clip: ClipCandidate,
-  appSettings: AppSettings
+  appSettings: AppSettings,
+  quality: ExportQualityMode = 'best'
 ): Promise<string> {
   if (!project.localVideoFilename) {
     throw new Error(
@@ -1002,19 +1380,36 @@ async function renderClipWithFfmpeg(
     throw new Error('Source video file was not found on disk.');
   }
 
-  const outFilename = `${project.id}_${clip.id}_${clip.outputFormat.replace(':', 'x')}.mp4`;
+  const outFilename = `${project.id}_${clip.id}_${clip.outputFormat.replace(':', 'x')}_${quality}.mp4`;
   const outPath = path.join(EXPORTS_DIR, outFilename);
   const assFilename = `tmp_${project.id}_${clip.id}.ass`;
   const assPath = path.join(EXPORTS_DIR, assFilename);
 
-  const { width: outW, height: outH } = getOutputDimensions(clip.outputFormat);
+  let srcW = project.videoWidth || 1920;
+  let srcH = project.videoHeight || 1080;
+  let hasAudioStream = project.hasAudioStream;
+  try {
+    const probed = await probeMedia(sourcePath);
+    if (probed.width > 0 && probed.height > 0) {
+      srcW = probed.width;
+      srcH = probed.height;
+    }
+    hasAudioStream = probed.hasAudio;
+  } catch {
+    // Fall back to stored project metadata if probe fails
+  }
+  const { width: outW, height: outH } = getOutputDimensions(
+    clip.outputFormat,
+    srcW,
+    srcH,
+    quality
+  );
   const assContent = buildAssContent(clip, appSettings, outW, outH);
   fs.writeFileSync(assPath, assContent, 'utf-8');
 
-  const srcW = project.videoWidth || 1920;
-  const srcH = project.videoHeight || 1080;
   const targetRatio = outW / outH;
   const srcRatio = srcW / srcH;
+  const scaleFlags = 'flags=lanczos+accurate_rnd+full_chroma_int';
 
   let cropFilter = '';
   if (srcRatio > targetRatio + 0.02) {
@@ -1023,12 +1418,12 @@ async function renderClipWithFfmpeg(
     const maxOffset = Math.max(0, srcW - cropW);
     const centerPx = Math.round(clip.speakerCenterX * srcW);
     const xOffset = clamp(Math.round(centerPx - cropW / 2), 0, maxOffset);
-    cropFilter = `crop=${cropW}:${srcH}:${xOffset}:0,scale=${outW}:${outH}`;
+    cropFilter = `crop=${cropW}:${srcH}:${xOffset}:0,scale=${outW}:${outH}:${scaleFlags}`;
   } else if (srcRatio < targetRatio - 0.02) {
     // Source is taller than target (e.g. 9:16 -> 16:9): scale and pad cleanly
-    cropFilter = `scale=${outW}:${outH}:force_original_aspect_ratio=decrease,pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2:color=#0B0D12`;
+    cropFilter = `scale=${outW}:${outH}:force_original_aspect_ratio=decrease:${scaleFlags},pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2:color=#0B0D12`;
   } else {
-    cropFilter = `scale=${outW}:${outH}`;
+    cropFilter = `scale=${outW}:${outH}:${scaleFlags}`;
   }
 
   const relativeAssPath = path.relative(ROOT_DIR, assPath).replace(/\\/g, '/').replace(/:/g, '\\:');
@@ -1053,12 +1448,12 @@ async function renderClipWithFfmpeg(
       '-t',
       String(clipDur),
       '-i',
-      `aevalsrc=0.035*sin(2*PI*110*t)+0.02*sin(2*PI*164.81*t)*(0.5+0.5*sin(2*PI*0.5*t)):s=44100`
+      `aevalsrc=0.035*sin(2*PI*110*t)+0.02*sin(2*PI*164.81*t)*(0.5+0.5*sin(2*PI*0.5*t)):s=48000`
     );
   }
 
   if (clip.addBackgroundMusic) {
-    if (project.hasAudioStream !== false) {
+    if (hasAudioStream !== false) {
       args.push(
         '-filter_complex',
         `[0:v]${vfChain}[vout];[0:a]volume=1.0[va];[1:a]volume=0.22[bg];[va][bg]amix=inputs=2:duration=shortest[aout]`,
@@ -1079,31 +1474,39 @@ async function renderClipWithFfmpeg(
     }
   } else {
     args.push('-vf', vfChain, '-map', '0:v:0');
-    if (project.hasAudioStream !== false) {
+    if (hasAudioStream !== false) {
       args.push('-map', '0:a?');
     }
   }
 
+  const isBest = quality === 'best';
+  const h264Level = outW * outH > 1920 * 1080 ? '5.1' : '4.2';
   args.push(
     '-c:v',
     'libx264',
+    '-profile:v',
+    'high',
+    '-level:v',
+    h264Level,
     '-preset',
-    'veryfast',
+    isBest ? 'medium' : 'fast',
     '-crf',
-    '22',
+    isBest ? '15' : '18',
     '-pix_fmt',
     'yuv420p',
     '-c:a',
     'aac',
     '-b:a',
-    '128k',
+    isBest ? '320k' : '256k',
+    '-ar',
+    '48000',
     '-movflags',
     '+faststart',
     outPath
   );
 
   try {
-    await execFileAsync('ffmpeg', args, { maxBuffer: 1024 * 1024 * 20 });
+    await execFileAsync('ffmpeg', args, { maxBuffer: 1024 * 1024 * 32 });
   } finally {
     if (fs.existsSync(assPath)) {
       fs.unlinkSync(assPath);
@@ -1111,6 +1514,34 @@ async function renderClipWithFfmpeg(
   }
 
   return `/exports/${outFilename}?v=${Date.now()}`;
+}
+
+function getExportFilePathForClip(
+  projectId: string,
+  clip: ClipCandidate,
+  preferredQuality?: ExportQualityMode
+): string | null {
+  const formatTag = clip.outputFormat.replace(':', 'x');
+  if (preferredQuality) {
+    const qualityPath = path.join(
+      EXPORTS_DIR,
+      `${projectId}_${clip.id}_${formatTag}_${preferredQuality}.mp4`
+    );
+    if (fs.existsSync(qualityPath)) return qualityPath;
+    return null;
+  }
+
+  if (clip.renderedVideoUrl) {
+    const cleanFile = path.basename(clip.renderedVideoUrl.split('?')[0]);
+    if (cleanFile) {
+      const candidate = path.join(EXPORTS_DIR, cleanFile);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+  const bestCanonical = path.join(EXPORTS_DIR, `${projectId}_${clip.id}_${formatTag}_best.mp4`);
+  if (fs.existsSync(bestCanonical)) return bestCanonical;
+  const legacyCanonical = path.join(EXPORTS_DIR, `${projectId}_${clip.id}_${formatTag}.mp4`);
+  return fs.existsSync(legacyCanonical) ? legacyCanonical : null;
 }
 
 const storage = multer.diskStorage({
@@ -1128,23 +1559,25 @@ const upload = multer({
 
 async function startServer() {
   recoverInterruptedProjects();
+  autoConnectEnvironment();
 
   const app = express();
-  const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
-    .split(',')
-    .map((o) => o.trim())
-    .filter(Boolean);
+  app.set('trust proxy', true);
 
   app.use((req, res, next) => {
     const origin = req.headers.origin;
-    if (allowedOrigins.length === 0) {
+    const explicitOrigins = (process.env.ALLOWED_ORIGINS || '')
+      .split(',')
+      .map((o) => o.trim())
+      .filter(Boolean);
+    if (explicitOrigins.length === 0) {
       res.setHeader('Access-Control-Allow-Origin', origin || '*');
-    } else if (origin && allowedOrigins.includes(origin)) {
+    } else if (origin && explicitOrigins.includes(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
     }
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
-    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-ClipGenius-Mp4-Count');
     if (req.method === 'OPTIONS') {
       res.status(204).end();
       return;
@@ -1155,10 +1588,23 @@ async function startServer() {
   app.use(express.json({ limit: '10mb' }));
 
   app.use('/uploads', express.static(UPLOADS_DIR));
+  app.use('/uploads', (_req, res) => {
+    res.status(404).json({
+      error: 'Source video file is not on server disk. Re-attach the video file to render clips.',
+    });
+  });
   app.use('/exports', express.static(EXPORTS_DIR));
+  app.use('/exports', (_req, res) => {
+    res.status(404).json({
+      error: 'Rendered clip MP4 was not found on disk. Click Render & Download MP4 to generate it.',
+    });
+  });
   app.use('/thumbnails', express.static(THUMBNAILS_DIR));
+  app.use('/thumbnails', (_req, res) => {
+    res.status(404).json({ error: 'Thumbnail not found.' });
+  });
 
-  app.get('/api/health', async (_req, res) => {
+  const buildHealthPayload = async (req: express.Request) => {
     let ffmpegAvailable = false;
     let ffprobeAvailable = false;
     try {
@@ -1180,67 +1626,36 @@ async function startServer() {
     } catch {
       storageWritable = false;
     }
-    const hasRealEnv = (...names: string[]) =>
-      names.some((name) => {
-        const val = (process.env[name] || '').trim();
-        return Boolean(val && !val.startsWith('MY_'));
-      });
-    const rawAppUrl = (process.env.APP_URL || '').trim();
-    const resolvedAppUrl =
-      rawAppUrl && rawAppUrl !== 'MY_APP_URL' && /^https?:\/\//i.test(rawAppUrl)
-        ? rawAppUrl.replace(/\/+$/, '')
-        : `http://localhost:${PORT}`;
 
-    const ytId = hasRealEnv('GOOGLE_CLIENT_ID', 'YOUTUBE_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_ID');
-    const ytSecret = hasRealEnv(
-      'GOOGLE_CLIENT_SECRET',
-      'YOUTUBE_CLIENT_SECRET',
-      'GOOGLE_OAUTH_CLIENT_SECRET'
-    );
-    const ttId = hasRealEnv('TIKTOK_CLIENT_KEY', 'TIKTOK_CLIENT_ID');
-    const ttSecret = hasRealEnv('TIKTOK_CLIENT_SECRET');
-    const igId = hasRealEnv(
-      'META_APP_ID',
-      'INSTAGRAM_APP_ID',
-      'FACEBOOK_APP_ID',
-      'META_CLIENT_ID',
-      'INSTAGRAM_CLIENT_ID',
-      'FACEBOOK_CLIENT_ID'
-    );
-    const igSecret = hasRealEnv(
-      'META_APP_SECRET',
-      'INSTAGRAM_APP_SECRET',
-      'FACEBOOK_APP_SECRET',
-      'META_CLIENT_SECRET',
-      'INSTAGRAM_CLIENT_SECRET',
-      'FACEBOOK_CLIENT_SECRET'
-    );
+    const envReport = autoConnectEnvironment(req);
 
-    res.json({
+    return {
       ok: true,
       ffmpegAvailable,
       ffprobeAvailable,
       storageWritable,
-      hasGeminiKey: hasRealEnv('GEMINI_API_KEY'),
+      hasGeminiKey: envReport.envStatus.geminiApiKey,
       environment: process.env.NODE_ENV || 'development',
-      resolvedAppUrl,
-      oauthCallbacks: {
-        youtube: `${resolvedAppUrl}/api/oauth/youtube/callback`,
-        tiktok: `${resolvedAppUrl}/api/oauth/tiktok/callback`,
-        instagram: `${resolvedAppUrl}/api/oauth/instagram/callback`,
-      },
-      envStatus: {
-        geminiApiKey: hasRealEnv('GEMINI_API_KEY'),
-        appUrl: hasRealEnv('APP_URL'),
-        youtubeOAuth: ytId && ytSecret,
-        youtubePartial: ytId !== ytSecret ? (ytId ? 'missing_secret' : 'missing_id') : undefined,
-        tiktokOAuth: ttId && ttSecret,
-        tiktokPartial: ttId !== ttSecret ? (ttId ? 'missing_secret' : 'missing_id') : undefined,
-        instagramOAuth: igId && igSecret,
-        instagramPartial: igId !== igSecret ? (igId ? 'missing_secret' : 'missing_id') : undefined,
-        allowedOrigins: hasRealEnv('ALLOWED_ORIGINS'),
-      },
-    });
+      resolvedAppUrl: envReport.resolvedAppUrl,
+      appUrlSource: envReport.appUrlSource,
+      allowedOriginsList: envReport.allowedOriginsList,
+      allowedOriginsMode: envReport.allowedOriginsMode,
+      firebase: envReport.firebase,
+      oauthCallbacks: envReport.oauthCallbacks,
+      envStatus: envReport.envStatus,
+    };
+  };
+
+  app.get('/api/health', async (req, res) => {
+    res.json(await buildHealthPayload(req));
+  });
+
+  app.get('/api/env/auto-connect', async (req, res) => {
+    res.json(await buildHealthPayload(req));
+  });
+
+  app.post('/api/env/auto-connect', async (req, res) => {
+    res.json(await buildHealthPayload(req));
   });
 
   app.get('/api/settings', (_req, res) => {
@@ -1256,6 +1671,48 @@ async function startServer() {
 
   app.get('/api/projects', (_req, res) => {
     res.json({ projects: readProjects() });
+  });
+
+  app.post('/api/projects/sync', (req, res) => {
+    const incoming = (req.body as { project?: Project })?.project;
+    if (!incoming || !incoming.id || !incoming.title) {
+      res.status(400).json({ error: 'Valid project payload is required.' });
+      return;
+    }
+
+    const existing = readProjects().find((p) => p.id === incoming.id);
+    if (existing) {
+      res.json({ project: existing });
+      return;
+    }
+
+    const hasSourceOnDisk = Boolean(
+      incoming.localVideoFilename &&
+        fs.existsSync(path.join(UPLOADS_DIR, path.basename(incoming.localVideoFilename)))
+    );
+
+    const sanitized: Project = {
+      ...incoming,
+      localVideoFilename: hasSourceOnDisk ? incoming.localVideoFilename : undefined,
+      localVideoUrl: hasSourceOnDisk ? incoming.localVideoUrl : undefined,
+      clips: (incoming.clips || []).map((c) => {
+        const exportPath = getExportFilePathForClip(incoming.id, c);
+        if (exportPath) {
+          return {
+            ...c,
+            renderStatus: 'completed',
+            renderedVideoUrl: `/exports/${path.basename(exportPath)}`,
+            renderError: undefined,
+          };
+        }
+        return c.renderStatus === 'completed'
+          ? { ...c, renderStatus: 'idle', renderedVideoUrl: undefined }
+          : c;
+      }),
+    };
+
+    upsertProject(sanitized);
+    res.json({ project: sanitized });
   });
 
   app.get('/api/projects/:id', (req, res) => {
@@ -1732,12 +2189,55 @@ ${transcriptText}`,
     }
   });
 
+  const buildClipDownloadFilename = (clip: { index: number; title: string }): string => {
+    const safeTitle = (clip.title || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40);
+    return `clip-${String(clip.index).padStart(2, '0')}-${safeTitle || 'clipgenius'}.mp4`;
+  };
+
   app.post('/api/projects/:id/clips/:clipId/render', async (req, res) => {
     const project = readProjects().find((p) => p.id === req.params.id);
     const clip = project?.clips.find((c) => c.id === req.params.clipId);
     if (!project || !clip) {
       res.status(404).json({ error: 'Project or clip not found.' });
       return;
+    }
+
+    const quality = normalizeQualityMode(req.query.quality || (req.body as { quality?: string })?.quality);
+    const skipIfExists = req.query.skipIfExists === 'true' || req.query.skipIfExists === '1';
+    const filename = buildClipDownloadFilename(clip);
+    const downloadUrl = `/api/projects/${project.id}/clips/${clip.id}/download?quality=${encodeURIComponent(
+      quality
+    )}`;
+
+    if (skipIfExists) {
+      const existingPath = getExportFilePathForClip(project.id, clip, quality);
+      if (existingPath && fs.existsSync(existingPath)) {
+        const renderedVideoUrl = `/exports/${path.basename(existingPath)}`;
+        const fileSizeBytes = fs.statSync(existingPath).size;
+        const updated =
+          clip.renderStatus === 'completed' && clip.renderedVideoUrl === renderedVideoUrl
+            ? project
+            : updateProjectInStore(project.id, (p) => ({
+                ...p,
+                clips: p.clips.map((c) =>
+                  c.id === clip.id
+                    ? { ...c, renderStatus: 'completed', renderedVideoUrl, renderError: undefined }
+                    : c
+                ),
+              })) || project;
+        res.json({
+          project: updated,
+          clip: updated.clips.find((c) => c.id === clip.id),
+          downloadUrl,
+          filename,
+          fileSizeBytes,
+        });
+        return;
+      }
     }
 
     updateProjectInStore(project.id, (p) => ({
@@ -1749,7 +2249,7 @@ ${transcriptText}`,
 
     try {
       const appSettings = readSettings();
-      const renderedVideoUrl = await renderClipWithFfmpeg(project, clip, appSettings);
+      const renderedVideoUrl = await renderClipWithFfmpeg(project, clip, appSettings, quality);
       const updated = updateProjectInStore(project.id, (p) => ({
         ...p,
         clips: p.clips.map((c) =>
@@ -1758,9 +2258,17 @@ ${transcriptText}`,
             : c
         ),
       }));
+      const cleanFile = path.basename(renderedVideoUrl.split('?')[0]);
+      const exportFilePath = path.join(EXPORTS_DIR, cleanFile);
+      const fileSizeBytes = fs.existsSync(exportFilePath)
+        ? fs.statSync(exportFilePath).size
+        : 0;
       res.json({
         project: updated,
         clip: updated?.clips.find((c) => c.id === clip.id),
+        downloadUrl,
+        filename,
+        fileSizeBytes,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'FFmpeg render failed.';
@@ -1788,6 +2296,7 @@ ${transcriptText}`,
       return;
     }
 
+    const quality = normalizeQualityMode(req.query.quality || (req.body as { quality?: string })?.quality);
     const targets = project.clips.filter((c) => c.selected);
     const appSettings = readSettings();
 
@@ -1799,7 +2308,7 @@ ${transcriptText}`,
         ),
       }));
       try {
-        const renderedVideoUrl = await renderClipWithFfmpeg(project, clip, appSettings);
+        const renderedVideoUrl = await renderClipWithFfmpeg(project, clip, appSettings, quality);
         updateProjectInStore(project.id, (p) => ({
           ...p,
           clips: p.clips.map((c) =>
@@ -1821,6 +2330,80 @@ ${transcriptText}`,
 
     const refreshed = readProjects().find((p) => p.id === project.id);
     res.json({ project: refreshed });
+  });
+
+  app.get('/api/projects/:id/clips/:clipId/download', async (req, res) => {
+    const project = readProjects().find((p) => p.id === req.params.id);
+    const clip = project?.clips.find((c) => c.id === req.params.clipId);
+    if (!project || !clip) {
+      res.status(404).json({ error: 'Project or clip not found.' });
+      return;
+    }
+
+    const quality = normalizeQualityMode(req.query.quality);
+    let filePath = getExportFilePathForClip(project.id, clip, quality);
+
+    if (!filePath) {
+      const sourceExists = Boolean(
+        project.localVideoFilename &&
+          fs.existsSync(path.join(UPLOADS_DIR, path.basename(project.localVideoFilename)))
+      );
+      if (!sourceExists) {
+        // Fall back to any previously rendered MP4 on disk if source is absent
+        filePath = getExportFilePathForClip(project.id, clip);
+        if (!filePath) {
+          res.status(409).json({
+            error:
+              'Attach your authorized source video file first so FFmpeg can cut and download this MP4 clip.',
+            needsVideoAttach: true,
+          });
+          return;
+        }
+      } else {
+        updateProjectInStore(project.id, (p) => ({
+          ...p,
+          clips: p.clips.map((c) =>
+            c.id === clip.id ? { ...c, renderStatus: 'rendering', renderError: undefined } : c
+          ),
+        }));
+
+        try {
+          const appSettings = readSettings();
+          const renderedVideoUrl = await renderClipWithFfmpeg(project, clip, appSettings, quality);
+          updateProjectInStore(project.id, (p) => ({
+            ...p,
+            clips: p.clips.map((c) =>
+              c.id === clip.id
+                ? { ...c, renderStatus: 'completed', renderedVideoUrl, renderError: undefined }
+                : c
+            ),
+          }));
+          const cleanFile = path.basename(renderedVideoUrl.split('?')[0]);
+          filePath = path.join(EXPORTS_DIR, cleanFile);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : 'FFmpeg render failed.';
+          updateProjectInStore(project.id, (p) => ({
+            ...p,
+            clips: p.clips.map((c) =>
+              c.id === clip.id ? { ...c, renderStatus: 'failed', renderError: message } : c
+            ),
+          }));
+          res.status(500).json({ error: message });
+          return;
+        }
+      }
+    }
+
+    if (!filePath || !fs.existsSync(filePath)) {
+      res.status(404).json({ error: 'Rendered MP4 file could not be located on disk.' });
+      return;
+    }
+
+    const downloadName = buildClipDownloadFilename(clip);
+
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
+    res.sendFile(filePath);
   });
 
   app.get('/api/projects/:id/clips/:clipId/srt', (req, res) => {
@@ -1848,15 +2431,77 @@ ${transcriptText}`,
     res.send(srt);
   });
 
-  app.get('/api/projects/:id/export-zip', (req, res) => {
-    const project = readProjects().find((p) => p.id === req.params.id);
+  app.get('/api/projects/:id/export-zip', async (req, res) => {
+    let project = readProjects().find((p) => p.id === req.params.id);
     if (!project) {
       res.status(404).json({ error: 'Project not found.' });
       return;
     }
 
+    const quality = normalizeQualityMode(req.query.quality);
+    const selectedClips = project.clips.filter((c) => c.selected);
+    const clipsToExport = selectedClips.length > 0 ? selectedClips : project.clips;
+    const hasLocalSource = Boolean(
+      project.localVideoFilename &&
+        fs.existsSync(path.join(UPLOADS_DIR, path.basename(project.localVideoFilename)))
+    );
+
+    if (hasLocalSource) {
+      const appSettings = readSettings();
+      for (const clip of clipsToExport) {
+        if (!getExportFilePathForClip(project.id, clip, quality)) {
+          try {
+            const renderedVideoUrl = await renderClipWithFfmpeg(project, clip, appSettings, quality);
+            const updated = updateProjectInStore(project.id, (p) => ({
+              ...p,
+              clips: p.clips.map((c) =>
+                c.id === clip.id
+                  ? { ...c, renderStatus: 'completed', renderedVideoUrl, renderError: undefined }
+                  : c
+              ),
+            }));
+            if (updated) project = updated;
+          } catch (err) {
+            const message = err instanceof Error ? err.message : 'FFmpeg render failed.';
+            const updated = updateProjectInStore(project.id, (p) => ({
+              ...p,
+              clips: p.clips.map((c) =>
+                c.id === clip.id ? { ...c, renderStatus: 'failed', renderError: message } : c
+              ),
+            }));
+            if (updated) project = updated;
+          }
+        }
+      }
+    }
+
+    const refreshedSelected = project.clips.filter((c) => c.selected);
+    const finalClipsToExport =
+      refreshedSelected.length > 0 ? refreshedSelected : project.clips;
+
+    const clipEntries = finalClipsToExport.map((clip) => {
+      const srt = clip.segments
+        .map((seg, i) => {
+          const start = Math.max(0, seg.startSeconds - clip.startSeconds);
+          const end = Math.max(start + 0.5, seg.endSeconds - clip.startSeconds);
+          return `${i + 1}\n${formatSrtTime(start)} --> ${formatSrtTime(
+            end
+          )}\n${seg.text.trim()}\n`;
+        })
+        .join('\n');
+
+      const mp4Path =
+        getExportFilePathForClip(project!.id, clip, quality) ||
+        getExportFilePathForClip(project!.id, clip);
+
+      return { clip, srt, mp4Path };
+    });
+
+    const includedMp4Count = clipEntries.filter((entry) => Boolean(entry.mp4Path)).length;
+
     const safeProjName = project.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40);
     res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('X-ClipGenius-Mp4-Count', String(includedMp4Count));
     res.setHeader(
       'Content-Disposition',
       `attachment; filename="${safeProjName || 'clipgenius'}-export.zip"`
@@ -1868,34 +2513,22 @@ ${transcriptText}`,
     });
     archive.pipe(res);
 
-    const selectedClips = project.clips.filter((c) => c.selected);
-    const clipsToExport = selectedClips.length > 0 ? selectedClips : project.clips;
-
     const socialKitLines: string[] = [
       `ClipGenius AI — Export Package`,
       `Project: ${project.title}`,
+      `Quality: ${quality === 'best' ? 'Best Quality (Native/4K, CRF 15, 320k AAC)' : '1080p HD (CRF 18, 256k AAC)'}`,
+      `MP4 Videos Included: ${includedMp4Count} of ${clipEntries.length}`,
       `Generated: ${new Date().toISOString()}`,
       `==================================================\n`,
     ];
 
-    for (const clip of clipsToExport) {
-      const srt = clip.segments
-        .map((seg, i) => {
-          const start = Math.max(0, seg.startSeconds - clip.startSeconds);
-          const end = Math.max(start + 0.5, seg.endSeconds - clip.startSeconds);
-          return `${i + 1}\n${formatSrtTime(start)} --> ${formatSrtTime(
-            end
-          )}\n${seg.text.trim()}\n`;
-        })
-        .join('\n');
+    for (const { clip, srt, mp4Path } of clipEntries) {
       archive.append(srt, { name: `subtitles/clip_${clip.index}.srt` });
 
-      if (clip.renderedVideoUrl) {
-        const cleanFile = clip.renderedVideoUrl.split('?')[0].replace(/^\/exports\//, '');
-        const fullPath = path.join(EXPORTS_DIR, cleanFile);
-        if (fs.existsSync(fullPath)) {
-          archive.file(fullPath, { name: `videos/clip_${clip.index}_${clip.outputFormat.replace(':', 'x')}.mp4` });
-        }
+      if (mp4Path) {
+        archive.file(mp4Path, {
+          name: `videos/clip_${clip.index}_${clip.outputFormat.replace(':', 'x')}.mp4`,
+        });
       }
 
       socialKitLines.push(
@@ -1909,6 +2542,30 @@ ${transcriptText}`,
         `Facebook: ${clip.platformCaptions.facebook}`,
         `Hashtags: ${clip.hashtags.join(' ')}`,
         `--------------------------------------------------\n`
+      );
+    }
+
+    if (includedMp4Count === 0) {
+      archive.append(
+        [
+          'WHERE ARE THE .MP4 VIDEO FILES?',
+          '==================================',
+          '',
+          `Project: ${project.title}`,
+          `Source Type: ${project.sourceType}`,
+          '',
+          'This ZIP package includes your .SRT subtitle files and social_media_kit.txt,',
+          'but 0 .MP4 video files were included because no source video file is currently',
+          'attached on the ClipGenius server disk for this project.',
+          '',
+          'HOW TO EXPORT CUT .MP4 VIDEO CLIPS:',
+          '1. Open ClipGenius AI -> Export (or Clip Editor).',
+          '2. Click "Attach Video File" (or upload your video when creating a New Project).',
+          '3. Click "Download MP4" on any clip, or click "Download All Clips (.ZIP)" again.',
+          '4. Your .mp4 files will save directly to your browser Downloads folder (and inside videos/ in the ZIP).',
+          '',
+        ].join('\n'),
+        { name: 'README_WHERE_ARE_MP4_FILES.txt' }
       );
     }
 
@@ -1939,7 +2596,12 @@ ${transcriptText}`,
       '.git',
       '.aistudio',
     ]);
-    const excludedFiles = new Set(['.env']);
+    const excludedFiles = new Set([
+      '.env',
+      '.env.local',
+      '.env.development.local',
+      '.env.production.local',
+    ]);
 
     const addDirectoryToArchive = (currentDir: string, relativePrefix = '') => {
       const entries = fs.readdirSync(currentDir, { withFileTypes: true });

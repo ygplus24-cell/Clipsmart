@@ -12,17 +12,33 @@ import {
   Sliders,
   Square,
 } from 'lucide-react';
-import type { ClipCandidate, Project } from '../types';
-import { apiUrl } from '../utils/api';
+import type {
+  ClipCandidate,
+  ExportQualityMode,
+  Project,
+  ReadyMp4Download,
+} from '../types';
+import {
+  apiUrl,
+  buildClipDownloadFilename,
+  isClipRenderedForQuality,
+} from '../utils/api';
 import {
   formatDurationLabel,
   formatTimecode,
   getScoreTierText,
 } from '../utils/formatters';
+import { ReadyMp4Banner } from './ReadyMp4Banner';
 
 interface AnalysisViewProps {
   project: Project | null;
+  exportQuality: ExportQualityMode;
+  readyMp4Download: ReadyMp4Download | null;
+  isProjectSyncedOnServer: boolean;
+  onDismissReadyMp4: () => void;
+  onMarkDirectMp4Download: (clip: ClipCandidate, quality?: ExportQualityMode) => void;
   onOpenEditor: (clipId: string) => void;
+  onDownloadClip: (clip: ClipCandidate, quality?: ExportQualityMode) => Promise<void>;
   onGoToExport: () => void;
   onCreateNew: () => void;
   onRetryProject: (projectId: string) => Promise<void>;
@@ -46,7 +62,13 @@ const PIPELINE_STEPS = [
 
 export const AnalysisView: React.FC<AnalysisViewProps> = ({
   project,
+  exportQuality,
+  readyMp4Download,
+  isProjectSyncedOnServer,
+  onDismissReadyMp4,
+  onMarkDirectMp4Download,
   onOpenEditor,
+  onDownloadClip,
   onGoToExport,
   onCreateNew,
   onRetryProject,
@@ -62,6 +84,8 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
   const [manualStart, setManualStart] = useState(0);
   const [manualEnd, setManualEnd] = useState(30);
   const [addingManual, setAddingManual] = useState(false);
+  const [downloadingClipId, setDownloadingClipId] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   const sortedClips = useMemo(() => {
     if (!project) return [];
@@ -371,6 +395,17 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
         </div>
       </div>
 
+      <ReadyMp4Banner readyDownload={readyMp4Download} onDismiss={onDismissReadyMp4} />
+
+      {downloadError && (
+        <div
+          role="alert"
+          className="rounded-lg border border-rose-500/30 bg-rose-950/40 px-4 py-3 text-xs text-rose-200"
+        >
+          {downloadError}
+        </div>
+      )}
+
       {/* Candidate Cards */}
       <div className="space-y-4">
         {sortedClips.map((clip: ClipCandidate) => {
@@ -457,7 +492,7 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2 lg:justify-end">
                     <button
                       type="button"
                       onClick={() =>
@@ -468,6 +503,60 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
                       <Sliders className="h-3.5 w-3.5" />
                       <span>{isExpanded ? 'Hide Rubric' : 'Score Rubric'}</span>
                     </button>
+                    {isProjectSyncedOnServer &&
+                    isClipRenderedForQuality(clip, exportQuality) ? (
+                      <a
+                        href={apiUrl(
+                          `/api/projects/${project.id}/clips/${clip.id}/download?quality=${encodeURIComponent(
+                            exportQuality
+                          )}`
+                        )}
+                        download={buildClipDownloadFilename(clip)}
+                        rel="noopener noreferrer"
+                        onClick={() => onMarkDirectMp4Download(clip, exportQuality)}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500 whitespace-nowrap shrink-0"
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        <span>Download MP4</span>
+                      </a>
+                    ) : project.localVideoUrl || clip.renderStatus === 'completed' ? (
+                      <button
+                        type="button"
+                        disabled={downloadingClipId === clip.id}
+                        onClick={async () => {
+                          setDownloadingClipId(clip.id);
+                          setDownloadError(null);
+                          try {
+                            await onDownloadClip(clip, exportQuality);
+                          } catch (err) {
+                            setDownloadError(
+                              err instanceof Error ? err.message : 'MP4 download failed.'
+                            );
+                          } finally {
+                            setDownloadingClipId(null);
+                          }
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50 whitespace-nowrap shrink-0"
+                      >
+                        {downloadingClipId === clip.id ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Download className="h-3.5 w-3.5" />
+                        )}
+                        <span>
+                          {downloadingClipId === clip.id ? 'Preparing MP4...' : 'Download MP4'}
+                        </span>
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={onGoToExport}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-3 py-2 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/25 whitespace-nowrap shrink-0"
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        <span>Attach Video / Export</span>
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => onOpenEditor(clip.id)}
